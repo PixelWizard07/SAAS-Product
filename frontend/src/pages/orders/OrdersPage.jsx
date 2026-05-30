@@ -1,11 +1,12 @@
-import { useState, useMemo } from 'react'
-import { Search, Filter, Download, Printer } from 'lucide-react'
+import { useState } from 'react'
+import { Search, Download, Printer, RefreshCw } from 'lucide-react'
 import Badge from '../../components/ui/Badge'
 import Modal from '../../components/ui/Modal'
-import { MOCK_ORDERS, MOCK_ACCOUNTS } from '../../lib/mockData'
 import { format } from 'date-fns'
 import * as XLSX from 'xlsx'
 import toast from 'react-hot-toast'
+import { useOrders } from '../../hooks/useOrders'
+import { useAccounts } from '../../hooks/useAccounts'
 
 const STATUSES = ['All', 'Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled']
 
@@ -15,18 +16,14 @@ export default function OrdersPage() {
   const [accountId, setAccountId] = useState('all')
   const [selected, setSelected] = useState(null)
 
-  const filtered = useMemo(() => MOCK_ORDERS.filter(o => {
-    if (status !== 'All' && o.status !== status) return false
-    if (accountId !== 'all' && o.accountId._id !== accountId) return false
-    if (search && !o.orderId.toLowerCase().includes(search.toLowerCase()) && !o.productName.toLowerCase().includes(search.toLowerCase())) return false
-    return true
-  }), [search, status, accountId])
+  const { accounts } = useAccounts()
+  const { data: orders = [], isLoading } = useOrders({ accountId, status, search })
 
   const exportXLSX = () => {
-    const ws = XLSX.utils.json_to_sheet(filtered.map(o => ({
+    const ws = XLSX.utils.json_to_sheet(orders.map(o => ({
       'Order ID': o.orderId, 'Product': o.productName, 'SKU': o.sku, 'Variant': o.variant,
       'Buyer': o.buyerName, 'Status': o.status, 'Payment': o.paymentMode, 'Price': o.price,
-      'Account': o.accountId.nickname, 'Order Date': format(new Date(o.orderDate), 'dd MMM yyyy'),
+      'Account': o.accountId?.nickname || o.accountId, 'Order Date': o.orderDate ? format(new Date(o.orderDate), 'dd MMM yyyy') : '',
     })))
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Orders')
@@ -39,7 +36,7 @@ export default function OrdersPage() {
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Orders</h1>
-          <p className="text-slate-500 text-sm">{filtered.length} orders found</p>
+          <p className="text-slate-500 text-sm">{orders.length} orders found</p>
         </div>
         <button onClick={exportXLSX} className="flex items-center gap-2 border border-slate-200 hover:bg-slate-50 px-3 py-2 rounded-xl text-sm font-medium text-slate-700">
           <Download size={15} /> Export Excel
@@ -61,48 +58,58 @@ export default function OrdersPage() {
         <select value={accountId} onChange={e => setAccountId(e.target.value)}
           className="px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 bg-white">
           <option value="all">All Accounts</option>
-          {MOCK_ACCOUNTS.map(a => <option key={a._id} value={a._id}>{a.nickname}</option>)}
+          {accounts.map(a => <option key={a._id} value={a._id}>{a.nickname}</option>)}
         </select>
       </div>
 
       {/* Table */}
       <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
-                {['Product', 'Order ID', 'Buyer', 'Date', 'Payment', 'Price', 'Status', 'Account'].map(h => (
-                  <th key={h} className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>
-                ))}
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {filtered.map(order => (
-                <tr key={order._id} onClick={() => setSelected(order)} className="hover:bg-slate-50 cursor-pointer transition-colors">
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-3">
-                      <img src={order.productImage} alt="" className="w-9 h-9 rounded-lg object-cover bg-slate-100" />
-                      <div>
-                        <p className="font-medium text-slate-900 line-clamp-1">{order.productName}</p>
-                        <p className="text-xs text-slate-400">{order.variant}</p>
-                      </div>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-slate-600 font-mono text-xs">{order.orderId}</td>
-                  <td className="px-4 py-3 text-slate-600">{order.buyerName}</td>
-                  <td className="px-4 py-3 text-slate-500 text-xs">{format(new Date(order.orderDate), 'dd MMM')}</td>
-                  <td className="px-4 py-3"><span className={`text-xs font-medium ${order.paymentMode === 'COD' ? 'text-orange-600' : 'text-green-600'}`}>{order.paymentMode}</span></td>
-                  <td className="px-4 py-3 font-semibold text-slate-900">₹{order.price}</td>
-                  <td className="px-4 py-3"><Badge label={order.status} /></td>
-                  <td className="px-4 py-3 text-xs text-slate-500">{order.accountId.nickname}</td>
+        {isLoading ? (
+          <div className="flex items-center justify-center py-16 text-slate-400">
+            <RefreshCw size={20} className="animate-spin mr-2" /> Loading orders…
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-slate-50 border-b border-slate-100">
+                  {['Product', 'Order ID', 'Buyer', 'Date', 'Payment', 'Price', 'Status', 'Account'].map(h => (
+                    <th key={h} className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>
+                  ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
-          {filtered.length === 0 && (
-            <div className="text-center py-12 text-slate-400">No orders match your filters</div>
-          )}
-        </div>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {orders.map(order => (
+                  <tr key={order._id} onClick={() => setSelected(order)} className="hover:bg-slate-50 cursor-pointer transition-colors">
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-3">
+                        <img src={order.productImage} alt="" className="w-9 h-9 rounded-lg object-cover bg-slate-100" />
+                        <div>
+                          <p className="font-medium text-slate-900 line-clamp-1">{order.productName}</p>
+                          <p className="text-xs text-slate-400">{order.variant}</p>
+                        </div>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3 text-slate-600 font-mono text-xs">{order.orderId}</td>
+                    <td className="px-4 py-3 text-slate-600">{order.buyerName}</td>
+                    <td className="px-4 py-3 text-slate-500 text-xs">{order.orderDate ? format(new Date(order.orderDate), 'dd MMM') : '—'}</td>
+                    <td className="px-4 py-3"><span className={`text-xs font-medium ${order.paymentMode === 'COD' ? 'text-orange-600' : 'text-green-600'}`}>{order.paymentMode}</span></td>
+                    <td className="px-4 py-3 font-semibold text-slate-900">₹{order.price}</td>
+                    <td className="px-4 py-3"><Badge label={order.status} /></td>
+                    <td className="px-4 py-3 text-xs text-slate-500">{order.accountId?.nickname || '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {orders.length === 0 && (
+              <div className="text-center py-12 text-slate-400">
+                {accounts.some(a => a.lastSyncAt)
+                  ? 'No orders match your filters'
+                  : 'Sync an account to load orders'}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Detail modal */}
@@ -120,13 +127,13 @@ export default function OrdersPage() {
             <div className="grid grid-cols-2 gap-3 text-sm">
               {[
                 ['Order ID', selected.orderId],
-                ['Account', selected.accountId.nickname],
+                ['Account', selected.accountId?.nickname || '—'],
                 ['Buyer', selected.buyerName],
                 ['Address', selected.buyerAddress],
                 ['Payment', selected.paymentMode],
                 ['Price', `₹${selected.price}`],
-                ['Order Date', format(new Date(selected.orderDate), 'dd MMM yyyy')],
-                ['Expected Delivery', format(new Date(selected.expectedDelivery), 'dd MMM yyyy')],
+                ['Order Date', selected.orderDate ? format(new Date(selected.orderDate), 'dd MMM yyyy') : '—'],
+                ['Expected Delivery', selected.expectedDelivery ? format(new Date(selected.expectedDelivery), 'dd MMM yyyy') : '—'],
               ].map(([k, v]) => (
                 <div key={k} className="bg-slate-50 rounded-xl p-3">
                   <p className="text-xs text-slate-500">{k}</p>

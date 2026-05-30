@@ -1,17 +1,22 @@
-import { useState, useEffect } from 'react'
-import { Copy, CheckCircle, RefreshCw, Clock } from 'lucide-react'
-import { MOCK_RETURNS } from '../../lib/mockData'
+import { useEffect, useState } from 'react'
+import { Copy, CheckCircle, RefreshCw, Clock, Key } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import toast from 'react-hot-toast'
+import { useReturns } from '../../hooks/useReturns'
 
 export default function OtpPanelPage() {
-  const [otpReturns, setOtpReturns] = useState(MOCK_RETURNS.filter(r => r.otp))
   const [tick, setTick] = useState(0)
+  const { data: allReturns = [], isLoading } = useReturns({ accountId: 'all' })
+  const [localState, setLocalState] = useState({})
 
   useEffect(() => {
     const interval = setInterval(() => setTick(t => t + 1), 1000)
     return () => clearInterval(interval)
   }, [])
+
+  const otpReturns = allReturns.filter(r => r.otp)
+
+  const isUsed = (id) => localState[id]?.used ?? false
 
   const handleCopy = (otp) => {
     navigator.clipboard.writeText(otp)
@@ -19,7 +24,7 @@ export default function OtpPanelPage() {
   }
 
   const handleMarkUsed = (id) => {
-    setOtpReturns(r => r.map(x => x._id === id ? { ...x, otpUsed: true } : x))
+    setLocalState(s => ({ ...s, [id]: { used: true } }))
     toast.success('OTP marked as used')
   }
 
@@ -37,8 +42,16 @@ export default function OtpPanelPage() {
     return formatDistanceToNow(new Date(ts), { addSuffix: true })
   }
 
-  const activeOtps = otpReturns.filter(r => !r.otpUsed)
-  const usedOtps = otpReturns.filter(r => r.otpUsed)
+  const activeOtps = otpReturns.filter(r => !isUsed(r._id) && !r.otpUsed)
+  const usedOtps = otpReturns.filter(r => isUsed(r._id) || r.otpUsed)
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-20 text-slate-400">
+        <RefreshCw size={20} className="animate-spin mr-2" /> Loading OTPs…
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -69,7 +82,7 @@ export default function OtpPanelPage() {
                   <div className="flex-1 min-w-0">
                     <p className="font-semibold text-slate-900 truncate">{ret.productName}</p>
                     <p className="text-xs text-slate-500">{ret.orderId}</p>
-                    <p className="text-xs font-medium text-brand-600 mt-0.5">{ret.accountId.nickname}</p>
+                    <p className="text-xs font-medium text-brand-600 mt-0.5">{ret.accountId?.nickname || '—'}</p>
                   </div>
                 </div>
 
@@ -125,7 +138,7 @@ export default function OtpPanelPage() {
         <div className="text-center py-16 text-slate-400">
           <Key size={40} className="mx-auto mb-3 opacity-30" />
           <p>No return OTPs available</p>
-          <p className="text-sm mt-1">OTPs will appear here when returns are initiated</p>
+          <p className="text-sm mt-1">OTPs will appear here when returns are initiated after sync</p>
         </div>
       )}
     </div>

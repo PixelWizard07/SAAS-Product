@@ -1,47 +1,31 @@
 import { useState } from 'react'
-import { Plus, RefreshCw, Trash2, Edit2, Wifi, WifiOff } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, ShoppingBag } from 'lucide-react'
 import Modal from '../../components/ui/Modal'
 import Badge from '../../components/ui/Badge'
-import { MOCK_ACCOUNTS } from '../../lib/mockData'
 import { formatDistanceToNow } from 'date-fns'
-import toast from 'react-hot-toast'
+import { useAccounts } from '../../hooks/useAccounts'
 
 export default function AccountsPage() {
-  const [accounts, setAccounts] = useState(MOCK_ACCOUNTS)
+  const { accounts, isLoading, addAccount, isAdding, deleteAccount, syncAccount, isSyncing, syncingId } = useAccounts()
   const [showAdd, setShowAdd] = useState(false)
-  const [syncing, setSyncing] = useState({})
   const [form, setForm] = useState({ nickname: '', phone: '', password: '' })
-
-  const handleSync = async (id) => {
-    setSyncing(s => ({ ...s, [id]: true }))
-    toast.promise(new Promise(r => setTimeout(r, 2000)), {
-      loading: 'Syncing account…',
-      success: 'Sync started in background',
-      error: 'Sync failed',
-    })
-    setTimeout(() => setSyncing(s => ({ ...s, [id]: false })), 2000)
-  }
 
   const handleAdd = (e) => {
     e.preventDefault()
-    const newAcc = {
-      _id: `acc${Date.now()}`,
-      nickname: form.nickname,
-      phone: form.phone,
-      shopName: 'Fetching…',
-      profilePicture: `https://api.dicebear.com/7.x/shapes/svg?seed=${Date.now()}`,
-      status: 'inactive',
-      lastSyncAt: null,
-    }
-    setAccounts(a => [...a, newAcc])
-    setShowAdd(false)
-    setForm({ nickname: '', phone: '', password: '' })
-    toast.success('Account added! Sync to fetch data.')
+    addAccount(form, {
+      onSuccess: () => {
+        setShowAdd(false)
+        setForm({ nickname: '', phone: '', password: '' })
+      },
+    })
+  }
+
+  const handleSync = (id) => {
+    syncAccount(id)
   }
 
   const handleDelete = (id) => {
-    setAccounts(a => a.filter(acc => acc._id !== id))
-    toast.success('Account removed')
+    if (window.confirm('Remove this account?')) deleteAccount(id)
   }
 
   return (
@@ -56,37 +40,80 @@ export default function AccountsPage() {
         </button>
       </div>
 
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-        {accounts.map(acc => (
-          <div key={acc._id} className="bg-white rounded-xl border border-slate-100 shadow-sm p-5">
-            <div className="flex items-start gap-4">
-              <img src={acc.profilePicture} alt="" className="w-14 h-14 rounded-xl object-cover bg-slate-100" />
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <h3 className="font-semibold text-slate-900 truncate">{acc.nickname}</h3>
-                  <Badge label={acc.status} />
+      {isLoading ? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {[1, 2, 3].map(i => (
+            <div key={i} className="bg-white rounded-xl border border-slate-100 shadow-sm p-5 animate-pulse">
+              <div className="flex items-start gap-4">
+                <div className="w-14 h-14 rounded-xl bg-slate-100" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-4 bg-slate-100 rounded w-3/4" />
+                  <div className="h-3 bg-slate-100 rounded w-1/2" />
                 </div>
-                <p className="text-sm text-slate-500 truncate">{acc.shopName}</p>
-                <p className="text-xs text-slate-400 mt-1">{acc.phone}</p>
               </div>
             </div>
-            <div className="mt-4 pt-4 border-t border-slate-50 flex items-center justify-between">
-              <p className="text-xs text-slate-400">
-                {acc.lastSyncAt ? `Synced ${formatDistanceToNow(new Date(acc.lastSyncAt))} ago` : 'Never synced'}
-              </p>
-              <div className="flex items-center gap-1">
-                <button onClick={() => handleSync(acc._id)} disabled={syncing[acc._id]}
-                  className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-brand-600 disabled:opacity-50">
-                  <RefreshCw size={15} className={syncing[acc._id] ? 'animate-spin' : ''} />
-                </button>
-                <button onClick={() => handleDelete(acc._id)} className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500">
-                  <Trash2 size={15} />
-                </button>
+          ))}
+        </div>
+      ) : accounts.length === 0 ? (
+        <div className="text-center py-20 text-slate-400">
+          <ShoppingBag size={48} className="mx-auto mb-4 opacity-30" />
+          <p className="text-lg font-medium text-slate-600">No accounts yet</p>
+          <p className="text-sm mt-1 mb-6">Add your first Meesho seller account to get started</p>
+          <button onClick={() => setShowAdd(true)} className="inline-flex items-center gap-2 bg-brand-500 hover:bg-brand-600 text-white px-5 py-2.5 rounded-xl text-sm font-medium transition-colors">
+            <Plus size={16} /> Add First Account
+          </button>
+        </div>
+      ) : (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {accounts.map(acc => (
+            <div key={acc._id} className="bg-white rounded-xl border border-slate-100 shadow-sm p-5">
+              <div className="flex items-start gap-4">
+                <img
+                  src={acc.profilePicture || `https://api.dicebear.com/7.x/shapes/svg?seed=${acc._id}`}
+                  alt=""
+                  className="w-14 h-14 rounded-xl object-cover bg-slate-100"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h3 className="font-semibold text-slate-900 truncate">{acc.nickname}</h3>
+                    <Badge label={acc.status} />
+                  </div>
+                  <p className="text-sm text-slate-500 truncate">{acc.shopName || 'Sync to fetch shop details'}</p>
+                  <p className="text-xs text-slate-400 mt-1">{acc.phone}</p>
+                </div>
               </div>
+              <div className="mt-4 pt-4 border-t border-slate-50 flex items-center justify-between">
+                <p className="text-xs text-slate-400">
+                  {acc.lastSyncAt ? `Synced ${formatDistanceToNow(new Date(acc.lastSyncAt))} ago` : 'Never synced — click sync to load data'}
+                </p>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={() => handleSync(acc._id)}
+                    disabled={isSyncing && syncingId === acc._id}
+                    title="Sync account"
+                    className="p-1.5 rounded-lg hover:bg-slate-100 text-slate-400 hover:text-brand-600 disabled:opacity-50"
+                  >
+                    <RefreshCw size={15} className={isSyncing && syncingId === acc._id ? 'animate-spin' : ''} />
+                  </button>
+                  <button onClick={() => handleDelete(acc._id)} className="p-1.5 rounded-lg hover:bg-red-50 text-slate-400 hover:text-red-500">
+                    <Trash2 size={15} />
+                  </button>
+                </div>
+              </div>
+              {!acc.lastSyncAt && (
+                <button
+                  onClick={() => handleSync(acc._id)}
+                  disabled={isSyncing && syncingId === acc._id}
+                  className="mt-3 w-full flex items-center justify-center gap-2 bg-brand-50 hover:bg-brand-100 text-brand-700 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50"
+                >
+                  <RefreshCw size={14} className={isSyncing && syncingId === acc._id ? 'animate-spin' : ''} />
+                  {isSyncing && syncingId === acc._id ? 'Syncing…' : 'Sync to load data'}
+                </button>
+              )}
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       <Modal open={showAdd} onClose={() => setShowAdd(false)} title="Add Meesho Account">
         <form onSubmit={handleAdd} className="space-y-4">
@@ -107,7 +134,9 @@ export default function AccountsPage() {
           </div>
           <div className="flex gap-3 pt-2">
             <button type="button" onClick={() => setShowAdd(false)} className="flex-1 px-4 py-2.5 border border-slate-200 rounded-xl text-sm font-medium hover:bg-slate-50">Cancel</button>
-            <button type="submit" className="flex-1 bg-brand-500 hover:bg-brand-600 text-white px-4 py-2.5 rounded-xl text-sm font-medium">Add Account</button>
+            <button type="submit" disabled={isAdding} className="flex-1 bg-brand-500 hover:bg-brand-600 text-white px-4 py-2.5 rounded-xl text-sm font-medium disabled:opacity-60">
+              {isAdding ? 'Adding…' : 'Add Account'}
+            </button>
           </div>
         </form>
       </Modal>

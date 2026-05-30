@@ -12,7 +12,7 @@ export function useOrders({ accountId = 'all', status = 'All', search = '' } = {
         if (status && status !== 'All') params.status = status
         if (search) params.search = search
         const { data } = await api.get('/orders', { params })
-        return data
+        return data.orders ?? data
       } catch {
         // Fallback to mock data
         return MOCK_ORDERS.filter(o => {

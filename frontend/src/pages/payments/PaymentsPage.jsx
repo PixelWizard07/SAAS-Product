@@ -1,24 +1,36 @@
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts'
-import Badge from '../../components/ui/Badge'
-import { MOCK_PAYMENTS, MOCK_ACCOUNTS } from '../../lib/mockData'
+import { RefreshCw } from 'lucide-react'
 import { format } from 'date-fns'
-import { useState } from 'react'
+import { usePayments } from '../../hooks/usePayments'
+import { useAccounts } from '../../hooks/useAccounts'
 
 export default function PaymentsPage() {
   const [accountId, setAccountId] = useState('all')
-  const filtered = useMemo(() => MOCK_PAYMENTS.filter(p => accountId === 'all' || p.accountId._id === accountId), [accountId])
-  const summary = useMemo(() => ({
-    credit: filtered.filter(p => p.type === 'credit').reduce((s, p) => s + p.amount, 0),
-    debit: filtered.filter(p => p.type === 'debit').reduce((s, p) => s + p.amount, 0),
-  }), [filtered])
-  summary.balance = summary.credit - summary.debit
 
-  const chartData = MOCK_ACCOUNTS.map(a => ({
+  const { accounts } = useAccounts()
+  const { data: payments = [], isLoading } = usePayments({ accountId })
+
+  // For the chart, get per-account data using all payments
+  const { data: allPayments = [] } = usePayments({ accountId: 'all' })
+
+  const summary = useMemo(() => {
+    const credit = payments.filter(p => p.type === 'credit').reduce((s, p) => s + p.amount, 0)
+    const debit = payments.filter(p => p.type === 'debit').reduce((s, p) => s + p.amount, 0)
+    return { credit, debit, balance: credit - debit }
+  }, [payments])
+
+  const chartData = useMemo(() => accounts.map(a => ({
     name: a.nickname,
-    credit: MOCK_PAYMENTS.filter(p => p.accountId._id === a._id && p.type === 'credit').reduce((s, p) => s + p.amount, 0),
-    debit: MOCK_PAYMENTS.filter(p => p.accountId._id === a._id && p.type === 'debit').reduce((s, p) => s + p.amount, 0),
-  }))
+    credit: allPayments.filter(p => {
+      const aid = p.accountId?._id || p.accountId
+      return String(aid) === String(a._id) && p.type === 'credit'
+    }).reduce((s, p) => s + p.amount, 0),
+    debit: allPayments.filter(p => {
+      const aid = p.accountId?._id || p.accountId
+      return String(aid) === String(a._id) && p.type === 'debit'
+    }).reduce((s, p) => s + p.amount, 0),
+  })), [accounts, allPayments])
 
   return (
     <div className="space-y-6">
@@ -30,7 +42,7 @@ export default function PaymentsPage() {
         <select value={accountId} onChange={e => setAccountId(e.target.value)}
           className="px-3 py-2 border border-slate-200 rounded-xl text-sm bg-white focus:outline-none focus:ring-2 focus:ring-brand-500">
           <option value="all">All Accounts</option>
-          {MOCK_ACCOUNTS.map(a => <option key={a._id} value={a._id}>{a.nickname}</option>)}
+          {accounts.map(a => <option key={a._id} value={a._id}>{a.nickname}</option>)}
         </select>
       </div>
 
@@ -69,25 +81,36 @@ export default function PaymentsPage() {
           <div className="px-5 py-4 border-b border-slate-100">
             <h2 className="text-sm font-semibold text-slate-900">Recent Transactions</h2>
           </div>
-          <div className="divide-y divide-slate-50">
-            {filtered.map(p => (
-              <div key={p._id} className="flex items-center gap-4 px-5 py-3">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${p.type === 'credit' ? 'bg-green-50' : 'bg-red-50'}`}>
-                  <span className={`text-sm font-bold ${p.type === 'credit' ? 'text-green-600' : 'text-red-500'}`}>{p.type === 'credit' ? '+' : '−'}</span>
+          {isLoading ? (
+            <div className="flex items-center justify-center py-12 text-slate-400">
+              <RefreshCw size={18} className="animate-spin mr-2" /> Loading…
+            </div>
+          ) : (
+            <div className="divide-y divide-slate-50">
+              {payments.map(p => (
+                <div key={p._id} className="flex items-center gap-4 px-5 py-3">
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${p.type === 'credit' ? 'bg-green-50' : 'bg-red-50'}`}>
+                    <span className={`text-sm font-bold ${p.type === 'credit' ? 'text-green-600' : 'text-red-500'}`}>{p.type === 'credit' ? '+' : '−'}</span>
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-sm font-medium text-slate-900 truncate">{p.description}</p>
+                    <p className="text-xs text-slate-400">{p.date ? format(new Date(p.date), 'dd MMM yyyy') : '—'} · {p.accountId?.nickname || '—'}</p>
+                  </div>
+                  <div className="text-right">
+                    <p className={`text-sm font-semibold ${p.type === 'credit' ? 'text-green-600' : 'text-red-500'}`}>
+                      {p.type === 'credit' ? '+' : '−'}₹{p.amount.toLocaleString()}
+                    </p>
+                    <p className="text-xs text-slate-400">Bal: ₹{p.balance?.toLocaleString() || '—'}</p>
+                  </div>
                 </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium text-slate-900 truncate">{p.description}</p>
-                  <p className="text-xs text-slate-400">{format(new Date(p.date), 'dd MMM yyyy')} · {p.accountId.nickname}</p>
+              ))}
+              {payments.length === 0 && (
+                <div className="text-center py-10 text-slate-400 text-sm">
+                  {accounts.some(a => a.lastSyncAt) ? 'No transactions found' : 'Sync an account to see payments'}
                 </div>
-                <div className="text-right">
-                  <p className={`text-sm font-semibold ${p.type === 'credit' ? 'text-green-600' : 'text-red-500'}`}>
-                    {p.type === 'credit' ? '+' : '−'}₹{p.amount.toLocaleString()}
-                  </p>
-                  <p className="text-xs text-slate-400">Bal: ₹{p.balance.toLocaleString()}</p>
-                </div>
-              </div>
-            ))}
-          </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

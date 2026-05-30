@@ -11,7 +11,7 @@ export function useReturns({ accountId = 'all', status = 'All' } = {}) {
         if (accountId && accountId !== 'all') params.accountId = accountId
         if (status && status !== 'All') params.status = status
         const { data } = await api.get('/returns', { params })
-        return data
+        return data.returns ?? data
       } catch {
         return MOCK_RETURNS.filter(r => {
           const accId = r.accountId?._id || r.accountId
