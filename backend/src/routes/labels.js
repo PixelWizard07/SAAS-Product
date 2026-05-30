@@ -1,0 +1,10 @@
+const router = require('express').Router();
+const auth = require('../middleware/auth');
+const { generateLabel, generateBulk, getLabels, retryLabel, markPrinted } = require('../controllers/labelsController');
+router.use(auth);
+router.get('/', getLabels);
+router.post('/generate/:orderId', generateLabel);
+router.post('/generate-bulk', generateBulk);
+router.put('/:id/retry', retryLabel);
+router.put('/:id/printed', markPrinted);
+module.exports = router;

@@ -67,3 +67,17 @@ export const MOCK_STATS = {
   pendingOrders: 3,
   totalProducts: 8,
 }
+
+export const MOCK_LABELS = [
+  { _id: 'l1', orderId: 'MH-2024-001', status: 'success', generatedAt: new Date().toISOString(), accountId: { nickname: 'Fashion Store' }, labelHtml: '<html><body><div style="border:2px solid #000;padding:20px;font-family:Arial"><h2 style="color:#6366F1">MeeshoHub</h2><p><strong>Order:</strong> MH-2024-001</p><p><strong>Ship To:</strong> Priya Sharma<br/>Mumbai, Maharashtra</p><p><strong>Product:</strong> Floral Kurti Set</p><p style="background:#D1FAE5;padding:8px;display:inline-block;font-weight:bold">PREPAID</p></div></body></html>' },
+  { _id: 'l2', orderId: 'MH-2024-002', status: 'failed', failReason: 'Buyer address missing', accountId: { nickname: 'Electronics Shop' } },
+  { _id: 'l3', orderId: 'MH-2024-004', status: 'success', generatedAt: new Date(Date.now() - 3600000).toISOString(), accountId: { nickname: 'Fashion Store' }, labelHtml: '<html><body><div style="border:2px solid #000;padding:20px;font-family:Arial"><h2 style="color:#6366F1">MeeshoHub</h2><p><strong>Order:</strong> MH-2024-004</p><p><strong>Ship To:</strong> Meena Khanna<br/>Jaipur, Rajasthan</p><p><strong>Product:</strong> Palazzo Pants</p><p style="background:#FEF3C7;padding:8px;display:inline-block;font-weight:bold">COD: ₹399</p></div></body></html>' },
+]
+
+export const MOCK_SETTINGS = {
+  syncIntervalMinutes: 15,
+  labelGenerationTime: '09:00',
+  autoLabelEnabled: false,
+  autoSyncEnabled: true,
+  timezone: 'Asia/Kolkata',
+}

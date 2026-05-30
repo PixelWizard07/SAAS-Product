@@ -7,5 +7,7 @@ router.use('/returns', require('./returns'));
 router.use('/products', require('./products'));
 router.use('/payments', require('./payments'));
 router.use('/notifications', require('./notifications'));
+router.use('/settings', require('./settings'));
+router.use('/labels', require('./labels'));
 
 module.exports = router;

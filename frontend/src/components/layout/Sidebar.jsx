@@ -1,18 +1,21 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Users, ShoppingBag, RotateCcw, Key, Package, CreditCard, Megaphone, BarChart3, Bell, Settings, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LayoutDashboard, Users, ShoppingBag, RotateCcw, Key, Package, CreditCard, Megaphone, BarChart3, Bell, Settings, ChevronLeft, ChevronRight, Tag, Grid } from 'lucide-react'
 import { useState } from 'react'
 
 const NAV = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
   { to: '/accounts', icon: Users, label: 'Accounts' },
   { to: '/orders', icon: ShoppingBag, label: 'Orders' },
+  { to: '/labels', icon: Tag, label: 'Labels' },
   { to: '/returns', icon: RotateCcw, label: 'Returns' },
   { to: '/otp', icon: Key, label: 'OTP Panel' },
   { to: '/products', icon: Package, label: 'Products' },
+  { to: '/catalogue', icon: Grid, label: 'Catalogue' },
   { to: '/payments', icon: CreditCard, label: 'Payments' },
   { to: '/ads', icon: Megaphone, label: 'Ads' },
   { to: '/reports', icon: BarChart3, label: 'Reports' },
   { to: '/notifications', icon: Bell, label: 'Notifications' },
+  { to: '/settings', icon: Settings, label: 'Settings' },
 ]
 
 export default function Sidebar() {

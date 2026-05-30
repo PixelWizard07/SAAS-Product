@@ -52,17 +52,23 @@ const seedAccountData = async (accountId, userId) => {
     Notification.deleteMany({ accountId }),
   ]);
 
-  const statuses = ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled'];
+  const statuses = ['Pending', 'Pending', 'Confirmed', 'Confirmed', 'Shipped', 'Shipped', 'Delivered', 'Delivered', 'Cancelled'];
   const paymentModes = ['Prepaid', 'COD'];
+  const labelStatuses = ['none', 'none', 'none', 'generated', 'generated', 'failed'];
 
-  // Create 10 orders
-  const orderDocs = Array.from({ length: 10 }, (_, i) => {
+  // Create 15 orders
+  const orderDocs = Array.from({ length: 15 }, (_, i) => {
     const prod = rand(products);
     const daysAgo = randInt(0, 10);
+    const status = rand(statuses);
+    const labelStatus = status === 'Delivered' || status === 'Shipped' ? rand(['generated', 'printed']) :
+      status === 'Cancelled' ? 'none' : rand(labelStatuses);
+    const shipByDate = new Date(Date.now() + randInt(-1, 3) * 86400000);
     return {
       accountId,
       userId,
       orderId: `MH-${Date.now()}-${String(i + 1).padStart(3, '0')}`,
+      subOrderId: `SUB-${Date.now()}-${String(i + 1).padStart(3, '0')}`,
       productName: prod.name,
       sku: prod.sku,
       variant: prod.variant,
@@ -71,8 +77,10 @@ const seedAccountData = async (accountId, userId) => {
       buyerAddress: rand(cities),
       orderDate: new Date(Date.now() - daysAgo * 86400000),
       expectedDelivery: new Date(Date.now() + randInt(2, 6) * 86400000),
+      shipByDate,
       paymentMode: rand(paymentModes),
-      status: rand(statuses),
+      status,
+      labelStatus,
       price: prod.price,
       quantity: randInt(1, 3),
     };

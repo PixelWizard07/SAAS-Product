@@ -16,6 +16,9 @@ const orderSchema = new mongoose.Schema({
   status: { type: String, enum: ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled'], default: 'Pending' },
   price: Number,
   quantity: Number,
+  labelStatus: { type: String, enum: ['none', 'generated', 'failed', 'printed'], default: 'none' },
+  shipByDate: Date,
+  subOrderId: String,
   createdAt: { type: Date, default: Date.now },
 });
 

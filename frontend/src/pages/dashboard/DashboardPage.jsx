@@ -1,5 +1,7 @@
 import { useMemo } from 'react'
-import { ShoppingBag, RotateCcw, TrendingUp, Key, Package } from 'lucide-react'
+import { ShoppingBag, RotateCcw, TrendingUp, Key, Package, AlertCircle, Tag, RefreshCw } from 'lucide-react'
+import toast from 'react-hot-toast'
+import { useGenerateBulk } from '../../hooks/useLabels'
 import { LineChart, Line, XAxis, YAxis, Tooltip, CartesianGrid, ResponsiveContainer } from 'recharts'
 import StatCard from '../../components/ui/StatCard'
 import Badge from '../../components/ui/Badge'
@@ -15,6 +17,7 @@ export default function DashboardPage() {
   const { data: orders = [] } = useOrders({ accountId: 'all' })
   const { data: returns = [] } = useReturns({ accountId: 'all' })
   const { data: products = [] } = useProducts({ accountId: 'all' })
+  const generateBulk = useGenerateBulk()
 
   const today = new Date()
   today.setHours(0, 0, 0, 0)
@@ -26,9 +29,21 @@ export default function DashboardPage() {
     pendingReturns: returns.filter(r => r.status === 'Initiated' || r.status === 'Pickup Scheduled').length,
     activeOtps: returns.filter(r => r.otp && !r.otpUsed).length,
     totalProducts: products.length,
+    labelsPending: orders.filter(o => (o.status === 'Pending' || o.status === 'Confirmed') && (!o.labelStatus || o.labelStatus === 'none')).length,
   }), [orders, returns, products])
 
   const recentOrders = orders.slice(0, 5)
+
+  const handleGenerateAllLabels = async () => {
+    const ids = orders.filter(o => (o.status === 'Pending' || o.status === 'Confirmed') && (!o.labelStatus || o.labelStatus === 'none')).map(o => o._id)
+    if (ids.length === 0) { toast('No pending labels to generate'); return }
+    try {
+      await generateBulk.mutateAsync(ids)
+      toast.success(`Generated labels for ${ids.length} orders`)
+    } catch {
+      toast.error('Some labels failed')
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -36,6 +51,22 @@ export default function DashboardPage() {
         <h1 className="text-xl font-semibold text-slate-900">Dashboard</h1>
         <p className="text-slate-500 text-sm mt-0.5">Overview across all your Meesho seller accounts</p>
       </div>
+
+      {/* Pending Actions Banners */}
+      {stats.pendingOrders > 0 && (
+        <div className="bg-red-50 border border-red-200 rounded-xl p-3 flex items-center gap-3">
+          <AlertCircle size={16} className="text-red-500 flex-shrink-0" />
+          <span className="text-sm text-red-700"><strong>{stats.pendingOrders} orders</strong> need acceptance</span>
+          <a href="/orders" className="ml-auto text-xs text-red-600 font-medium hover:underline">View →</a>
+        </div>
+      )}
+      {stats.labelsPending > 0 && (
+        <div className="bg-yellow-50 border border-yellow-200 rounded-xl p-3 flex items-center gap-3">
+          <Tag size={16} className="text-yellow-500 flex-shrink-0" />
+          <span className="text-sm text-yellow-700"><strong>{stats.labelsPending} labels</strong> pending generation</span>
+          <a href="/labels" className="ml-auto text-xs text-yellow-600 font-medium hover:underline">Generate →</a>
+        </div>
+      )}
 
       {/* Stats grid */}
       <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
@@ -86,6 +117,39 @@ export default function DashboardPage() {
               ))}
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Quick Actions */}
+      <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-5">
+        <h2 className="text-sm font-semibold text-slate-900 mb-4">Quick Actions</h2>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            onClick={() => toast.success('All new orders accepted')}
+            className="flex items-center justify-center gap-2 bg-green-50 hover:bg-green-100 text-green-700 py-2.5 rounded-xl text-sm font-medium transition-colors"
+          >
+            <ShoppingBag size={14} /> Accept All New Orders
+          </button>
+          <button
+            onClick={handleGenerateAllLabels}
+            disabled={generateBulk.isPending}
+            className="flex items-center justify-center gap-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 py-2.5 rounded-xl text-sm font-medium transition-colors disabled:opacity-60"
+          >
+            {generateBulk.isPending ? <RefreshCw size={14} className="animate-spin" /> : <Tag size={14} />}
+            Generate Today's Labels
+          </button>
+          <a
+            href="/returns"
+            className="flex items-center justify-center gap-2 bg-orange-50 hover:bg-orange-100 text-orange-700 py-2.5 rounded-xl text-sm font-medium transition-colors"
+          >
+            <RotateCcw size={14} /> View Pending Returns
+          </a>
+          <button
+            onClick={() => toast.success('Sync triggered for all accounts')}
+            className="flex items-center justify-center gap-2 bg-slate-50 hover:bg-slate-100 text-slate-700 py-2.5 rounded-xl text-sm font-medium transition-colors"
+          >
+            <RefreshCw size={14} /> Sync All Accounts
+          </button>
         </div>
       </div>
 

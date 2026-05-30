@@ -15,6 +15,9 @@ import PaymentsPage from './pages/payments/PaymentsPage'
 import AdsPage from './pages/ads/AdsPage'
 import ReportsPage from './pages/reports/ReportsPage'
 import NotificationsPage from './pages/notifications/NotificationsPage'
+import LabelsPage from './pages/labels/LabelsPage'
+import SettingsPage from './pages/settings/SettingsPage'
+import CataloguePage from './pages/catalogue/CataloguePage'
 
 export default function App() {
   return (
@@ -36,6 +39,9 @@ export default function App() {
               <Route path="ads" element={<AdsPage />} />
               <Route path="reports" element={<ReportsPage />} />
               <Route path="notifications" element={<NotificationsPage />} />
+              <Route path="labels" element={<LabelsPage />} />
+              <Route path="settings" element={<SettingsPage />} />
+              <Route path="catalogue" element={<CataloguePage />} />
             </Route>
             <Route path="*" element={<Navigate to="/dashboard" replace />} />
           </Routes>

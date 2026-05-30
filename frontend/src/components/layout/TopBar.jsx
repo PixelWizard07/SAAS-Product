@@ -5,6 +5,7 @@ import { useAccount } from '../../contexts/AccountContext'
 import { MOCK_ACCOUNTS, MOCK_NOTIFICATIONS, MOCK_STATS } from '../../lib/mockData'
 import { useNavigate } from 'react-router-dom'
 import toast from 'react-hot-toast'
+import { useSettings } from '../../hooks/useSettings'
 
 export default function TopBar({ darkMode, toggleDark }) {
   const { user, logout } = useAuth()
@@ -14,6 +15,7 @@ export default function TopBar({ darkMode, toggleDark }) {
   const navigate = useNavigate()
   const unread = MOCK_NOTIFICATIONS.filter(n => !n.isRead).length
   const selectedAccount = MOCK_ACCOUNTS.find(a => a._id === selectedAccountId)
+  const { data: settings } = useSettings()
 
   const handleLogout = async () => {
     await logout()
@@ -33,6 +35,16 @@ export default function TopBar({ darkMode, toggleDark }) {
       </div>
 
       <div className="flex items-center gap-2 ml-auto">
+        {/* Auto-sync indicator */}
+        {settings?.autoSyncEnabled && (
+          <div
+            title={`Auto-sync enabled — every ${settings?.syncIntervalMinutes || 15} min`}
+            className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-green-50 border border-green-200 text-green-700 text-xs font-medium cursor-default"
+          >
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />
+            Auto
+          </div>
+        )}
         {/* Account Switcher */}
         <div className="relative">
           <button

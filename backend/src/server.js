@@ -7,6 +7,8 @@ const rateLimit = require('express-rate-limit');
 const cookieParser = require('cookie-parser');
 const { connect } = require('./config/db');
 const routes = require('./routes');
+const { startAutoSync } = require('./jobs/autoSync');
+const { startAutoLabel } = require('./jobs/autoLabel');
 const errorHandler = require('./middleware/errorHandler');
 
 const app = express();
@@ -31,6 +33,8 @@ const PORT = process.env.PORT || 5000;
 
 connect().then(() => {
   app.listen(PORT, () => console.log(`MeeshoHub backend running on port ${PORT}`));
+  startAutoSync();
+  startAutoLabel();
 }).catch(err => {
   console.error('Failed to connect to MongoDB:', err.message);
   process.exit(1);
