@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { Search, Download, RefreshCw, ChevronDown, Printer, Tag, XCircle } from 'lucide-react'
+import { Search, Download, RefreshCw, ChevronDown, Printer, Tag, XCircle, Layers } from 'lucide-react'
 import { format, differenceInDays, isPast, isToday } from 'date-fns'
 import * as XLSX from 'xlsx'
 import toast from 'react-hot-toast'
@@ -132,6 +132,87 @@ export default function OrdersPage() {
     }
   }
 
+  const [bulkLabelLoading, setBulkLabelLoading] = useState(false)
+
+  const handleDownloadAllLabels = async (orderIds) => {
+    if (!orderIds.length) return
+    setBulkLabelLoading(true)
+    const toastId = toast.loading(`Generating ${orderIds.length} label${orderIds.length > 1 ? 's' : ''}…`)
+    try {
+      const results = await Promise.allSettled(
+        orderIds.map(id => downloadLabel.mutateAsync(id))
+      )
+      const htmlParts = results
+        .filter(r => r.status === 'fulfilled' && r.value)
+        .map(r => r.value)
+
+      if (!htmlParts.length) {
+        toast.error('No labels could be generated', { id: toastId })
+        return
+      }
+
+      // Strip <html>/<body> wrappers and join with print page-breaks
+      const bodyContents = htmlParts.map(html => {
+        const match = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
+        return match ? match[1] : html
+      })
+
+      const combined = `<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8"/>
+  <title>Meesho Labels (${htmlParts.length})</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, sans-serif; background: #fff; }
+    .label-page { page-break-after: always; padding: 16px; }
+    .label-page:last-child { page-break-after: auto; }
+    @media print {
+      .label-page { page-break-after: always; }
+      .label-page:last-child { page-break-after: auto; }
+      .no-print { display: none !important; }
+    }
+    .print-bar {
+      position: fixed; top: 0; left: 0; right: 0;
+      background: #4f46e5; color: #fff; padding: 10px 20px;
+      display: flex; align-items: center; justify-content: space-between;
+      z-index: 9999; font-size: 14px;
+    }
+    .print-bar button {
+      background: #fff; color: #4f46e5; border: none;
+      padding: 6px 16px; border-radius: 6px; font-weight: 600;
+      cursor: pointer; font-size: 14px;
+    }
+    .content { margin-top: 52px; }
+  </style>
+</head>
+<body>
+  <div class="print-bar no-print">
+    <span>📦 ${htmlParts.length} of ${orderIds.length} label${orderIds.length > 1 ? 's' : ''} ready</span>
+    <button onclick="window.print()">🖨 Print All</button>
+  </div>
+  <div class="content">
+    ${bodyContents.map(c => `<div class="label-page">${c}</div>`).join('\n')}
+  </div>
+  <script>
+    window.onafterprint = function() { window.close(); };
+  </script>
+</body>
+</html>`
+
+      const w = window.open('', '_blank')
+      w.document.write(combined)
+      w.document.close()
+      toast.success(`${htmlParts.length} label${htmlParts.length > 1 ? 's' : ''} ready — printing…`, { id: toastId })
+      setTimeout(() => w.print(), 600)
+      setSelectedRows([])
+    } catch {
+      toast.error('Bulk label generation failed', { id: toastId })
+    } finally {
+      setBulkLabelLoading(false)
+    }
+  }
+
   const exportXLSX = () => {
     const ws = XLSX.utils.json_to_sheet(tabOrders.map(o => ({
       'Sub-order ID': o.subOrderId || o.orderId,
@@ -169,6 +250,18 @@ export default function OrdersPage() {
           >
             <RefreshCw size={14} /> Refresh
           </button>
+          {tab === 'ready_to_ship' && tabOrders.length > 0 && (
+            <button
+              onClick={() => handleDownloadAllLabels(tabOrders.map(o => o._id))}
+              disabled={bulkLabelLoading}
+              className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-60 text-white px-3 py-1.5 rounded text-sm font-medium"
+            >
+              {bulkLabelLoading
+                ? <RefreshCw size={14} className="animate-spin" />
+                : <Layers size={14} />}
+              Print All Labels ({tabOrders.length})
+            </button>
+          )}
           <button
             onClick={exportXLSX}
             className="flex items-center gap-1.5 border border-slate-200 hover:bg-slate-50 px-3 py-1.5 rounded text-sm font-medium text-slate-600 bg-white"
@@ -302,10 +395,14 @@ export default function OrdersPage() {
           )}
           {tab === 'ready_to_ship' && (
             <button
-              onClick={() => { toast.success(`${selectedRows.length} labels downloaded`); setSelectedRows([]) }}
-              className="text-sm font-medium text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
+              onClick={() => handleDownloadAllLabels(selectedRows)}
+              disabled={bulkLabelLoading}
+              className="text-sm font-medium text-indigo-400 hover:text-indigo-300 flex items-center gap-1 disabled:opacity-50"
             >
-              <Tag size={14} /> Download All Labels
+              {bulkLabelLoading
+                ? <RefreshCw size={14} className="animate-spin" />
+                : <Tag size={14} />}
+              Print {selectedRows.length} Label{selectedRows.length > 1 ? 's' : ''}
             </button>
           )}
           <button onClick={() => setSelectedRows([])} className="text-slate-400 hover:text-white ml-2">
