@@ -13,12 +13,14 @@ const orderSchema = new mongoose.Schema({
   orderDate: Date,
   expectedDelivery: Date,
   paymentMode: { type: String, enum: ['Prepaid', 'COD'], default: 'Prepaid' },
-  status: { type: String, enum: ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled'], default: 'Pending' },
+  status: { type: String, enum: ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled', 'On Hold', 'Ready to Ship'], default: 'Pending' },
   price: Number,
   quantity: Number,
   labelStatus: { type: String, enum: ['none', 'generated', 'failed', 'printed'], default: 'none' },
   shipByDate: Date,
   subOrderId: String,
+  isAd: { type: Boolean, default: false },
+  buyerPhone: String,
   createdAt: { type: Date, default: Date.now },
 });
 

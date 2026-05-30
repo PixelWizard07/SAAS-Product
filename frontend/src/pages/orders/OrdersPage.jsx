@@ -3,9 +3,8 @@ import { Search, Download, RefreshCw, ChevronDown, Printer, Tag, XCircle } from 
 import { format, differenceInDays, isPast, isToday } from 'date-fns'
 import * as XLSX from 'xlsx'
 import toast from 'react-hot-toast'
-import { useOrders } from '../../hooks/useOrders'
+import { useOrders, useAcceptOrder, useCancelOrder, useDownloadOrderLabel } from '../../hooks/useOrders'
 import { useAccounts } from '../../hooks/useAccounts'
-import { useGenerateLabel } from '../../hooks/useLabels'
 
 const TABS = [
   { key: 'on_hold', label: 'On Hold' },
@@ -80,7 +79,9 @@ export default function OrdersPage() {
 
   const { accounts } = useAccounts()
   const { data: allOrders = [], isLoading, refetch } = useOrders({ accountId, search })
-  const generateLabel = useGenerateLabel()
+  const acceptOrder = useAcceptOrder()
+  const cancelOrder = useCancelOrder()
+  const downloadLabel = useDownloadOrderLabel()
 
   const tabOrders = useMemo(() => filterByTab(allOrders, tab), [allOrders, tab])
 
@@ -96,17 +97,39 @@ export default function OrdersPage() {
   const toggleAll = () =>
     setSelectedRows(selectedRows.length === tabOrders.length ? [] : tabOrders.map(o => o._id))
 
-  const handleAccept = async (orderId) => {
+  const handleAccept = async (order) => {
     try {
-      await generateLabel.mutateAsync(orderId)
-      toast.success('Order accepted and label generated')
+      await acceptOrder.mutateAsync(order._id)
+      toast.success(`Order ${order.subOrderId || order.orderId} accepted on Meesho`)
     } catch {
       toast.error('Failed to accept order')
     }
   }
 
-  const handleDownloadLabel = (order) => {
-    toast.success('Downloading label…')
+  const handleCancel = async (order) => {
+    try {
+      await cancelOrder.mutateAsync({ orderId: order._id, reason: 'Seller cancelled' })
+      toast.success('Order cancelled on Meesho')
+    } catch {
+      toast.error('Failed to cancel order')
+    }
+  }
+
+  const handleDownloadLabel = async (order) => {
+    try {
+      const html = await downloadLabel.mutateAsync(order._id)
+      if (html) {
+        const w = window.open('', '_blank')
+        w.document.write(html)
+        w.document.close()
+        w.print()
+        toast.success('Label opened for printing')
+      } else {
+        toast.error('Label not available')
+      }
+    } catch {
+      toast.error('Failed to download label')
+    }
   }
 
   const exportXLSX = () => {
@@ -237,10 +260,10 @@ export default function OrdersPage() {
                     tab={tab}
                     selected={selectedRows.includes(order._id)}
                     onToggle={() => toggleRow(order._id)}
-                    onAccept={() => handleAccept(order._id)}
-                    onCancel={() => toast.success('Order cancelled')}
+                    onAccept={() => handleAccept(order)}
+                    onCancel={() => handleCancel(order)}
                     onDownloadLabel={() => handleDownloadLabel(order)}
-                    generateLabel={generateLabel}
+                    isPending={acceptOrder.isPending || cancelOrder.isPending || downloadLabel.isPending}
                   />
                 ))}
               </tbody>
@@ -294,7 +317,7 @@ export default function OrdersPage() {
   )
 }
 
-function OrderRow({ order, tab, selected, onToggle, onAccept, onCancel, onDownloadLabel, generateLabel }) {
+function OrderRow({ order, tab, selected, onToggle, onAccept, onCancel, onDownloadLabel, isPending }) {
   const subOrderId = order.subOrderId || (order.orderId ? `${order.orderId}_1` : '—')
   const meeshoId = generateMeeshoId(order.orderId)
   const size = order.variant || order.size || 'Free Size'
@@ -371,8 +394,8 @@ function OrderRow({ order, tab, selected, onToggle, onAccept, onCancel, onDownlo
           <div className="flex items-center gap-2">
             <button
               onClick={onAccept}
-              disabled={generateLabel.isPending}
-              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-semibold"
+              disabled={isPending}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded text-xs font-semibold"
             >
               Accept
             </button>

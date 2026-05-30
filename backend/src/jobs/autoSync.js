@@ -1,8 +1,7 @@
 const cron = require('node-cron');
 const SellerAccount = require('../models/SellerAccount');
 const Settings = require('../models/Settings');
-const { seedAccountData } = require('../controllers/seedController');
-const Notification = require('../models/Notification');
+const { syncAccount } = require('../scrapers/syncService');
 
 let syncTask = null;
 
@@ -11,29 +10,20 @@ const startAutoSync = () => {
     try {
       const allSettings = await Settings.find({ autoSyncEnabled: true });
       for (const setting of allSettings) {
-        const accounts = await SellerAccount.find({ userId: setting.userId, status: 'active' });
+        const accounts = await SellerAccount.find({ userId: setting.userId, status: { $in: ['active', 'inactive'] } });
         for (const account of accounts) {
           const minutesSinceSync = account.lastSyncAt
             ? (Date.now() - new Date(account.lastSyncAt)) / 60000
             : Infinity;
           if (minutesSinceSync >= setting.syncIntervalMinutes) {
-            try {
-              await seedAccountData(account._id, setting.userId);
-              await SellerAccount.findByIdAndUpdate(account._id, { lastSyncAt: new Date() });
-              await Notification.create({
-                userId: setting.userId,
-                accountId: account._id,
-                message: `Auto-sync completed for ${account.nickname}`,
-                type: 'sync',
-              });
-            } catch (e) {
-              console.error(`Auto-sync failed for ${account._id}:`, e.message);
-            }
+            syncAccount(account._id.toString(), setting.userId.toString()).catch(e => {
+              console.error(`[autoSync] Failed for ${account.nickname}:`, e.message);
+            });
           }
         }
       }
     } catch (e) {
-      console.error('Auto-sync cron error:', e.message);
+      console.error('[autoSync] Cron error:', e.message);
     }
   });
 };

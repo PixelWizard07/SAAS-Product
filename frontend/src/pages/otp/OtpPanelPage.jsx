@@ -3,6 +3,7 @@ import { Copy, CheckCircle, RefreshCw, Clock, Key } from 'lucide-react'
 import { formatDistanceToNow } from 'date-fns'
 import toast from 'react-hot-toast'
 import { useReturns } from '../../hooks/useReturns'
+import api from '../../lib/axios'
 
 export default function OtpPanelPage() {
   const [tick, setTick] = useState(0)
@@ -30,8 +31,13 @@ export default function OtpPanelPage() {
 
   const handleRefresh = (id) => {
     toast.promise(
-      new Promise(r => setTimeout(r, 1500)),
-      { loading: 'Refreshing OTP…', success: 'OTP refreshed', error: 'Refresh failed' }
+      api.get(`/returns/${id}/otp`).then(res => {
+        if (res.data.otp) {
+          toast.dismiss()
+          toast.success(`OTP: ${res.data.otp}`)
+        }
+      }),
+      { loading: 'Fetching OTP from Meesho…', success: 'OTP fetched', error: 'Fetch failed' }
     )
   }
 

@@ -1,7 +1,6 @@
 const SellerAccount = require('../models/SellerAccount');
-const { encrypt, decrypt } = require('../utils/encryption');
-const { addSyncJob } = require('../queues/accountSyncQueue');
-const { seedAccountData } = require('./seedController');
+const { encrypt } = require('../utils/encryption');
+const { syncAccount } = require('../scrapers/syncService');
 
 const getAccounts = async (req, res, next) => {
   try {
@@ -45,25 +44,19 @@ const deleteAccount = async (req, res, next) => {
   } catch (err) { next(err); }
 };
 
-const syncAccount = async (req, res, next) => {
+const syncAccountHandler = async (req, res, next) => {
   try {
-    const account = await SellerAccount.findOne({ _id: req.params.id, userId: req.user.id }).select('+encryptedPassword');
+    const account = await SellerAccount.findOne({ _id: req.params.id, userId: req.user.id });
     if (!account) return res.status(404).json({ error: 'Account not found' });
-    await SellerAccount.findByIdAndUpdate(account._id, { status: 'syncing' });
 
-    // Seed data inline (works without Redis/scraper for demo)
-    const result = await seedAccountData(account._id, req.user.id);
-    await SellerAccount.findByIdAndUpdate(account._id, { status: 'active', lastSyncAt: new Date() });
+    // Run sync asynchronously — respond immediately so UI doesn't time out
+    // then update status; client should poll /accounts
+    res.json({ message: 'Sync started', accountId: account._id });
 
-    // Also try to enqueue a real scraper job if Redis is available
-    try {
-      await addSyncJob({ accountId: account._id.toString(), userId: req.user.id });
-    } catch (redisErr) {
-      // Redis unavailable — seed data already populated above
-    }
-
-    res.json({ message: 'Account synced successfully', orders: result.orders, returns: result.returns });
+    syncAccount(account._id.toString(), req.user.id).catch(err => {
+      console.error(`[accountsController] Sync error for ${account._id}:`, err.message);
+    });
   } catch (err) { next(err); }
 };
 
-module.exports = { getAccounts, addAccount, updateAccount, deleteAccount, syncAccount };
+module.exports = { getAccounts, addAccount, updateAccount, deleteAccount, syncAccount: syncAccountHandler };
