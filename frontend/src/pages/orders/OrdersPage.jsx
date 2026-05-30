@@ -1,8 +1,6 @@
 import { useState, useMemo } from 'react'
-import { Search, Download, RefreshCw, AlertCircle, Printer, CheckCircle, XCircle, Truck, Tag, RotateCcw, ChevronDown } from 'lucide-react'
-import Badge from '../../components/ui/Badge'
-import Modal from '../../components/ui/Modal'
-import { format, differenceInDays } from 'date-fns'
+import { Search, Download, RefreshCw, ChevronDown, Printer, Tag, XCircle } from 'lucide-react'
+import { format, differenceInDays, isPast, isToday } from 'date-fns'
 import * as XLSX from 'xlsx'
 import toast from 'react-hot-toast'
 import { useOrders } from '../../hooks/useOrders'
@@ -10,63 +8,87 @@ import { useAccounts } from '../../hooks/useAccounts'
 import { useGenerateLabel } from '../../hooks/useLabels'
 
 const TABS = [
-  { key: 'new', label: 'New Orders', color: 'indigo' },
-  { key: 'ready', label: 'Ready to Ship', color: 'green' },
-  { key: 'shipped', label: 'Shipped', color: 'blue' },
-  { key: 'delivered', label: 'Delivered', color: 'slate' },
-  { key: 'cancelled', label: 'Cancelled', color: 'slate' },
-  { key: 'failed', label: 'Failed Orders', color: 'red' },
+  { key: 'on_hold', label: 'On Hold' },
+  { key: 'pending', label: 'Pending' },
+  { key: 'ready_to_ship', label: 'Ready to Ship' },
+  { key: 'shipped', label: 'Shipped' },
+  { key: 'cancelled', label: 'Cancelled' },
 ]
+
+function getSlaStatus(shipByDate) {
+  if (!shipByDate) return 'ok'
+  const d = new Date(shipByDate)
+  if (isPast(d) && !isToday(d)) return 'breached'
+  if (isToday(d)) return 'today'
+  const diff = differenceInDays(d, new Date())
+  if (diff <= 1) return 'breaching'
+  return 'ok'
+}
+
+function SLABadge({ shipByDate }) {
+  const status = getSlaStatus(shipByDate)
+  if (status === 'breached') return (
+    <span className="inline-flex items-center gap-1 text-xs font-medium text-red-600 bg-red-50 border border-red-200 px-1.5 py-0.5 rounded">
+      ⚠ Breached
+    </span>
+  )
+  if (status === 'today' || status === 'breaching') return (
+    <span className="inline-flex items-center gap-1 text-xs font-medium text-amber-600 bg-amber-50 border border-amber-200 px-1.5 py-0.5 rounded">
+      ⚠ Breaching Soon
+    </span>
+  )
+  return null
+}
 
 function filterByTab(orders, tab) {
   switch (tab) {
-    case 'new': return orders.filter(o => (o.status === 'Pending' || o.status === 'Confirmed') && (!o.labelStatus || o.labelStatus === 'none'))
-    case 'ready': return orders.filter(o => o.labelStatus === 'generated')
+    case 'on_hold': return orders.filter(o => o.status === 'On Hold')
+    case 'pending': return orders.filter(o => o.status === 'Pending' || o.status === 'Confirmed')
+    case 'ready_to_ship': return orders.filter(o => o.labelStatus === 'generated' || o.status === 'Ready to Ship')
     case 'shipped': return orders.filter(o => o.status === 'Shipped')
-    case 'delivered': return orders.filter(o => o.status === 'Delivered')
     case 'cancelled': return orders.filter(o => o.status === 'Cancelled')
-    case 'failed': return orders.filter(o => o.labelStatus === 'failed')
     default: return orders
   }
 }
 
-function isOverdue(order) {
-  if (!order.shipByDate && !order.orderDate) return false
-  const refDate = order.shipByDate ? new Date(order.shipByDate) : new Date(new Date(order.orderDate).getTime() + 2 * 86400000)
-  return differenceInDays(new Date(), refDate) >= 0
+function generateMeeshoId(orderId) {
+  if (!orderId) return 'N/A'
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ0123456789'
+  let result = ''
+  let hash = 0
+  for (let i = 0; i < orderId.length; i++) hash = (hash * 31 + orderId.charCodeAt(i)) >>> 0
+  for (let i = 0; i < 9; i++) {
+    result += chars[hash % chars.length]
+    hash = (hash * 1103515245 + 12345) >>> 0
+  }
+  return result
+}
+
+function FilterDropdown({ label }) {
+  return (
+    <button className="flex items-center gap-1.5 px-3 py-1.5 border border-slate-200 rounded text-sm text-slate-600 hover:bg-slate-50 bg-white">
+      {label} <ChevronDown size={14} className="text-slate-400" />
+    </button>
+  )
 }
 
 export default function OrdersPage() {
-  const [tab, setTab] = useState('new')
+  const [tab, setTab] = useState('pending')
   const [search, setSearch] = useState('')
   const [accountId, setAccountId] = useState('all')
-  const [paymentFilter, setPaymentFilter] = useState('all')
-  const [selected, setSelected] = useState(null)
   const [selectedRows, setSelectedRows] = useState([])
 
   const { accounts } = useAccounts()
   const { data: allOrders = [], isLoading, refetch } = useOrders({ accountId, search })
   const generateLabel = useGenerateLabel()
 
-  const tabOrders = useMemo(() => {
-    let orders = filterByTab(allOrders, tab)
-    if (paymentFilter !== 'all') orders = orders.filter(o => o.paymentMode === paymentFilter)
-    return orders
-  }, [allOrders, tab, paymentFilter])
+  const tabOrders = useMemo(() => filterByTab(allOrders, tab), [allOrders, tab])
 
-  const tabCounts = useMemo(() => ({
-    new: filterByTab(allOrders, 'new').length,
-    ready: filterByTab(allOrders, 'ready').length,
-    shipped: filterByTab(allOrders, 'shipped').length,
-    delivered: filterByTab(allOrders, 'delivered').length,
-    cancelled: filterByTab(allOrders, 'cancelled').length,
-    failed: filterByTab(allOrders, 'failed').length,
-  }), [allOrders])
-
-  const overdueOrders = useMemo(() =>
-    filterByTab(allOrders, 'new').filter(isOverdue),
-    [allOrders]
-  )
+  const tabCounts = useMemo(() => {
+    const counts = {}
+    TABS.forEach(t => { counts[t.key] = filterByTab(allOrders, t.key).length })
+    return counts
+  }, [allOrders])
 
   const toggleRow = (id) => setSelectedRows(prev =>
     prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
@@ -74,29 +96,29 @@ export default function OrdersPage() {
   const toggleAll = () =>
     setSelectedRows(selectedRows.length === tabOrders.length ? [] : tabOrders.map(o => o._id))
 
-  const handleGenerateLabel = async (orderId) => {
+  const handleAccept = async (orderId) => {
     try {
       await generateLabel.mutateAsync(orderId)
-      toast.success('Label generated successfully')
+      toast.success('Order accepted and label generated')
     } catch {
-      toast.error('Failed to generate label')
+      toast.error('Failed to accept order')
     }
   }
 
-  const printLabel = (order) => {
-    toast.success('Opening label for printing…')
+  const handleDownloadLabel = (order) => {
+    toast.success('Downloading label…')
   }
 
   const exportXLSX = () => {
     const ws = XLSX.utils.json_to_sheet(tabOrders.map(o => ({
-      'Order ID': o.orderId,
+      'Sub-order ID': o.subOrderId || o.orderId,
       'Product': o.productName,
-      'Buyer': o.buyerName,
+      'SKU ID': o.sku,
+      'Meesho ID': generateMeeshoId(o.orderId),
+      'Quantity': o.quantity || 1,
+      'Size': o.variant || o.size || '—',
+      'Dispatch Date': o.shipByDate ? format(new Date(o.shipByDate), 'dd MMM yyyy') : '—',
       'Status': o.status,
-      'Payment': o.paymentMode,
-      'Price': o.price,
-      'Account': o.accountId?.nickname || o.accountId,
-      'Order Date': o.orderDate ? format(new Date(o.orderDate), 'dd MMM yyyy') : '',
     })))
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, 'Orders')
@@ -104,123 +126,51 @@ export default function OrdersPage() {
     toast.success('Exported to Excel')
   }
 
-  const renderActions = (order) => {
-    switch (tab) {
-      case 'new':
-        return (
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={e => { e.stopPropagation(); handleGenerateLabel(order._id) }}
-              disabled={generateLabel.isPending}
-              className="px-2.5 py-1.5 bg-green-50 text-green-700 hover:bg-green-100 rounded-lg text-xs font-medium flex items-center gap-1"
-            >
-              <CheckCircle size={12} /> Accept
-            </button>
-            <button
-              onClick={e => { e.stopPropagation(); toast.success('Order rejected') }}
-              className="px-2.5 py-1.5 border border-red-200 text-red-600 hover:bg-red-50 rounded-lg text-xs font-medium flex items-center gap-1"
-            >
-              <XCircle size={12} /> Reject
-            </button>
-          </div>
-        )
-      case 'ready':
-        return (
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={e => { e.stopPropagation(); printLabel(order) }}
-              className="px-2.5 py-1.5 bg-indigo-600 text-white hover:bg-indigo-700 rounded-lg text-xs font-medium flex items-center gap-1"
-            >
-              <Printer size={12} /> Print Label
-            </button>
-            <button
-              onClick={e => { e.stopPropagation(); toast.success('Marked as shipped') }}
-              className="px-2.5 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-lg text-xs font-medium flex items-center gap-1"
-            >
-              <Truck size={12} /> Mark Shipped
-            </button>
-          </div>
-        )
-      case 'shipped':
-        return (
-          <button
-            onClick={e => { e.stopPropagation(); toast('Tracking not available in demo') }}
-            className="px-2.5 py-1.5 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-lg text-xs font-medium flex items-center gap-1"
-          >
-            <Truck size={12} /> Track
-          </button>
-        )
-      case 'failed':
-        return (
-          <div className="flex items-center gap-1.5">
-            <button
-              onClick={e => { e.stopPropagation(); handleGenerateLabel(order._id) }}
-              className="px-2.5 py-1.5 bg-orange-50 text-orange-700 hover:bg-orange-100 rounded-lg text-xs font-medium flex items-center gap-1"
-            >
-              <RotateCcw size={12} /> Retry Label
-            </button>
-            <button
-              onClick={e => { e.stopPropagation(); toast.success('Printing anyway…') }}
-              className="px-2.5 py-1.5 bg-slate-100 text-slate-600 hover:bg-slate-200 rounded-lg text-xs font-medium flex items-center gap-1"
-            >
-              <Printer size={12} /> Print Anyway
-            </button>
-          </div>
-        )
-      default:
-        return null
-    }
-  }
-
   return (
-    <div className="space-y-5">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-slate-900">Orders</h1>
-          <p className="text-slate-500 text-sm">{allOrders.length} total orders</p>
-        </div>
+    <div className="space-y-0">
+      {/* Page Header */}
+      <div className="flex items-center justify-between pb-4">
+        <h1 className="text-xl font-semibold text-slate-900">Orders</h1>
         <div className="flex items-center gap-2">
+          <select
+            value={accountId}
+            onChange={e => setAccountId(e.target.value)}
+            className="px-3 py-1.5 border border-slate-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
+          >
+            <option value="all">All Accounts</option>
+            {accounts.map(a => <option key={a._id} value={a._id}>{a.nickname}</option>)}
+          </select>
           <button
             onClick={() => refetch()}
-            className="flex items-center gap-1.5 border border-slate-200 hover:bg-slate-50 px-3 py-2 rounded-xl text-sm font-medium text-slate-600"
+            className="flex items-center gap-1.5 border border-slate-200 hover:bg-slate-50 px-3 py-1.5 rounded text-sm font-medium text-slate-600 bg-white"
           >
             <RefreshCw size={14} /> Refresh
           </button>
           <button
             onClick={exportXLSX}
-            className="flex items-center gap-1.5 border border-slate-200 hover:bg-slate-50 px-3 py-2 rounded-xl text-sm font-medium text-slate-600"
+            className="flex items-center gap-1.5 border border-slate-200 hover:bg-slate-50 px-3 py-1.5 rounded text-sm font-medium text-slate-600 bg-white"
           >
             <Download size={14} /> Export
           </button>
         </div>
       </div>
 
-      {/* Ship-by alert banner on New Orders */}
-      {tab === 'new' && overdueOrders.length > 0 && (
-        <div className="bg-red-50 border border-red-200 rounded-xl p-3 flex items-center gap-3">
-          <AlertCircle size={16} className="text-red-500 flex-shrink-0" />
-          <span className="text-sm text-red-700">
-            <strong>{overdueOrders.length} orders</strong> are overdue and must be shipped immediately
-          </span>
-        </div>
-      )}
-
       {/* Tab Bar */}
-      <div className="border-b border-slate-200">
-        <div className="flex gap-0 overflow-x-auto">
+      <div className="bg-white border border-slate-200 rounded-t-lg border-b-0">
+        <div className="flex overflow-x-auto">
           {TABS.map(t => (
             <button
               key={t.key}
               onClick={() => { setTab(t.key); setSelectedRows([]) }}
-              className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
+              className={`px-5 py-3.5 text-sm font-medium border-b-2 transition-colors whitespace-nowrap ${
                 tab === t.key
-                  ? 'border-indigo-500 text-indigo-600'
-                  : 'border-transparent text-slate-500 hover:text-slate-700'
+                  ? 'border-indigo-600 text-indigo-600'
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
               }`}
             >
               {t.label}
               {tabCounts[t.key] > 0 && (
-                <span className={`ml-2 text-xs px-2 py-0.5 rounded-full ${
+                <span className={`ml-1.5 text-xs px-1.5 py-0.5 rounded-full ${
                   tab === t.key ? 'bg-indigo-100 text-indigo-700' : 'bg-slate-100 text-slate-500'
                 }`}>
                   {tabCounts[t.key]}
@@ -229,40 +179,29 @@ export default function OrdersPage() {
             </button>
           ))}
         </div>
-      </div>
 
-      {/* Filter Bar */}
-      <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-4 flex flex-wrap gap-3">
-        <div className="flex-1 min-w-48 relative">
-          <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <input
-            value={search}
-            onChange={e => setSearch(e.target.value)}
-            placeholder="Search by order ID, product or buyer…"
-            className="w-full pl-9 pr-4 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-          />
+        {/* Filter Bar */}
+        <div className="flex flex-wrap items-center gap-2 px-4 py-3 border-t border-slate-100 bg-slate-50/50">
+          <span className="text-sm text-slate-500 font-medium mr-1">Filter by</span>
+          <FilterDropdown label="SLA Status" />
+          <FilterDropdown label="Label downloaded" />
+          <FilterDropdown label="Dispatch Date" />
+          <FilterDropdown label="Order Date" />
+          <FilterDropdown label="SKU ID" />
+          <div className="ml-auto relative">
+            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400" />
+            <input
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder="Search orders…"
+              className="pl-8 pr-3 py-1.5 border border-slate-200 rounded text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white w-52"
+            />
+          </div>
         </div>
-        <select
-          value={accountId}
-          onChange={e => setAccountId(e.target.value)}
-          className="px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
-        >
-          <option value="all">All Accounts</option>
-          {accounts.map(a => <option key={a._id} value={a._id}>{a.nickname}</option>)}
-        </select>
-        <select
-          value={paymentFilter}
-          onChange={e => setPaymentFilter(e.target.value)}
-          className="px-3 py-2 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 bg-white"
-        >
-          <option value="all">All Payments</option>
-          <option value="Prepaid">Prepaid</option>
-          <option value="COD">COD</option>
-        </select>
       </div>
 
-      {/* Orders Table */}
-      <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
+      {/* Table */}
+      <div className="bg-white border border-slate-200 border-t-0 rounded-b-lg overflow-hidden">
         {isLoading ? (
           <div className="flex items-center justify-center py-16 text-slate-400">
             <RefreshCw size={20} className="animate-spin mr-2" /> Loading orders…
@@ -271,79 +210,45 @@ export default function OrdersPage() {
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="bg-slate-50 border-b border-slate-100">
+                <tr className="border-b border-slate-200 bg-slate-50">
                   <th className="px-4 py-3 w-10">
                     <input
                       type="checkbox"
                       checked={selectedRows.length === tabOrders.length && tabOrders.length > 0}
                       onChange={toggleAll}
-                      className="rounded"
+                      className="rounded border-slate-300"
                     />
                   </th>
-                  {['Product', 'Order ID', 'Buyer', 'Date', 'Payment', 'Price', 'Status', 'Actions'].map(h => (
-                    <th key={h} className="text-left px-4 py-3 text-xs font-medium text-slate-500 uppercase tracking-wide">{h}</th>
-                  ))}
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-600 min-w-64">Product Details</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-600 min-w-44">Sub-order ID</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-600">SKU ID</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-600">Meesho ID</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-600">Quantity</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-600">Size</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-600 min-w-36">Dispatch Date/SLA</th>
+                  <th className="text-left px-4 py-3 text-xs font-semibold text-slate-600 min-w-36">Action</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-50">
-                {tabOrders.map(order => {
-                  const overdue = tab === 'new' && isOverdue(order)
-                  return (
-                    <tr
-                      key={order._id}
-                      onClick={() => setSelected(order)}
-                      className={`hover:bg-slate-50 cursor-pointer transition-colors ${overdue ? 'bg-red-50/30' : ''}`}
-                    >
-                      <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-                        <input
-                          type="checkbox"
-                          checked={selectedRows.includes(order._id)}
-                          onChange={() => toggleRow(order._id)}
-                          className="rounded"
-                        />
-                      </td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-3">
-                          <img src={order.productImage} alt="" className="w-9 h-9 rounded-lg object-cover bg-slate-100 flex-shrink-0" />
-                          <div>
-                            <p className="font-medium text-slate-900 line-clamp-1">{order.productName}</p>
-                            <p className="text-xs text-slate-400">{order.variant}</p>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="px-4 py-3">
-                        <p className="text-slate-600 font-mono text-xs">{order.orderId}</p>
-                        <p className="text-slate-400 text-xs">{order.accountId?.nickname || '—'}</p>
-                      </td>
-                      <td className="px-4 py-3 text-slate-600">{order.buyerName}</td>
-                      <td className="px-4 py-3">
-                        <p className="text-slate-500 text-xs">{order.orderDate ? format(new Date(order.orderDate), 'dd MMM') : '—'}</p>
-                        {overdue && (
-                          <span className="text-xs font-bold text-red-600 bg-red-100 px-1.5 py-0.5 rounded mt-0.5 inline-block">OVERDUE</span>
-                        )}
-                        {tab === 'new' && order.shipByDate && !overdue && (
-                          <p className="text-xs text-orange-500 mt-0.5">Ship by {format(new Date(order.shipByDate), 'dd MMM')}</p>
-                        )}
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className={`text-xs font-medium ${order.paymentMode === 'COD' ? 'text-orange-600' : 'text-green-600'}`}>
-                          {order.paymentMode}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 font-semibold text-slate-900">₹{order.price}</td>
-                      <td className="px-4 py-3"><Badge label={order.status} /></td>
-                      <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
-                        {renderActions(order)}
-                      </td>
-                    </tr>
-                  )
-                })}
+              <tbody className="divide-y divide-slate-100">
+                {tabOrders.map(order => (
+                  <OrderRow
+                    key={order._id}
+                    order={order}
+                    tab={tab}
+                    selected={selectedRows.includes(order._id)}
+                    onToggle={() => toggleRow(order._id)}
+                    onAccept={() => handleAccept(order._id)}
+                    onCancel={() => toast.success('Order cancelled')}
+                    onDownloadLabel={() => handleDownloadLabel(order)}
+                    generateLabel={generateLabel}
+                  />
+                ))}
               </tbody>
             </table>
             {tabOrders.length === 0 && (
-              <div className="text-center py-12 text-slate-400">
+              <div className="text-center py-16 text-slate-400 text-sm">
                 {accounts.some(a => a.lastSyncAt)
-                  ? `No ${TABS.find(t => t.key === tab)?.label.toLowerCase()} found`
+                  ? `No ${TABS.find(t => t.key === tab)?.label.toLowerCase()} orders`
                   : 'Sync an account to load orders'}
               </div>
             )}
@@ -351,12 +256,12 @@ export default function OrdersPage() {
         )}
       </div>
 
-      {/* Floating Bulk Action Bar */}
+      {/* Bulk Action Bar */}
       {selectedRows.length > 0 && (
         <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-slate-900 text-white rounded-2xl shadow-2xl px-5 py-3 flex items-center gap-4">
           <span className="text-sm font-medium">{selectedRows.length} selected</span>
           <div className="w-px h-4 bg-slate-600" />
-          {tab === 'new' && (
+          {tab === 'pending' && (
             <>
               <button
                 onClick={() => { toast.success(`${selectedRows.length} orders accepted`); setSelectedRows([]) }}
@@ -365,27 +270,19 @@ export default function OrdersPage() {
                 Accept All
               </button>
               <button
-                onClick={async () => {
-                  try {
-                    for (const id of selectedRows) await generateLabel.mutateAsync(id)
-                    toast.success(`Labels generated for ${selectedRows.length} orders`)
-                    setSelectedRows([])
-                  } catch {
-                    toast.error('Some labels failed')
-                  }
-                }}
-                className="text-sm font-medium text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
+                onClick={() => { toast.success('Orders cancelled'); setSelectedRows([]) }}
+                className="text-sm font-medium text-red-400 hover:text-red-300"
               >
-                <Tag size={14} /> Generate Labels
+                Cancel All
               </button>
             </>
           )}
-          {tab === 'ready' && (
+          {tab === 'ready_to_ship' && (
             <button
-              onClick={() => { toast.success(`${selectedRows.length} labels printed`); setSelectedRows([]) }}
+              onClick={() => { toast.success(`${selectedRows.length} labels downloaded`); setSelectedRows([]) }}
               className="text-sm font-medium text-indigo-400 hover:text-indigo-300 flex items-center gap-1"
             >
-              <Printer size={14} /> Print All Labels
+              <Tag size={14} /> Download All Labels
             </button>
           )}
           <button onClick={() => setSelectedRows([])} className="text-slate-400 hover:text-white ml-2">
@@ -393,53 +290,128 @@ export default function OrdersPage() {
           </button>
         </div>
       )}
+    </div>
+  )
+}
 
-      {/* Detail modal */}
-      <Modal open={!!selected} onClose={() => setSelected(null)} title="Order Details" size="lg">
-        {selected && (
-          <div className="space-y-4">
-            <div className="flex gap-4">
-              <img src={selected.productImage} alt="" className="w-20 h-20 rounded-xl object-cover bg-slate-100" />
-              <div>
-                <h3 className="font-semibold text-slate-900">{selected.productName}</h3>
-                <p className="text-sm text-slate-500">{selected.sku} · {selected.variant}</p>
-                <Badge label={selected.status} className="mt-2" />
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-3 text-sm">
-              {[
-                ['Order ID', selected.orderId],
-                ['Account', selected.accountId?.nickname || '—'],
-                ['Buyer', selected.buyerName],
-                ['Address', selected.buyerAddress],
-                ['Payment', selected.paymentMode],
-                ['Price', `₹${selected.price}`],
-                ['Label Status', selected.labelStatus || 'none'],
-                ['Order Date', selected.orderDate ? format(new Date(selected.orderDate), 'dd MMM yyyy') : '—'],
-              ].map(([k, v]) => (
-                <div key={k} className="bg-slate-50 rounded-xl p-3">
-                  <p className="text-xs text-slate-500">{k}</p>
-                  <p className="font-medium text-slate-900 mt-0.5">{v}</p>
-                </div>
-              ))}
-            </div>
-            <div className="flex gap-2 pt-2">
-              <button
-                onClick={() => { handleGenerateLabel(selected._id); setSelected(null) }}
-                className="flex-1 flex items-center justify-center gap-2 border border-slate-200 hover:bg-slate-50 py-2.5 rounded-xl text-sm font-medium"
-              >
-                <Tag size={15} /> Generate Label
-              </button>
-              <button
-                onClick={() => { toast.success('Marked as packed'); setSelected(null) }}
-                className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2.5 rounded-xl text-sm font-medium"
-              >
-                Mark as Packed
-              </button>
-            </div>
+function OrderRow({ order, tab, selected, onToggle, onAccept, onCancel, onDownloadLabel, generateLabel }) {
+  const subOrderId = order.subOrderId || (order.orderId ? `${order.orderId}_1` : '—')
+  const meeshoId = generateMeeshoId(order.orderId)
+  const size = order.variant || order.size || 'Free Size'
+  const qty = order.quantity || 1
+  const labelDownloaded = order.labelStatus === 'printed' || order.labelStatus === 'generated'
+
+  return (
+    <tr className={`hover:bg-slate-50/60 transition-colors ${selected ? 'bg-indigo-50/30' : ''}`}>
+      <td className="px-4 py-3.5">
+        <input type="checkbox" checked={selected} onChange={onToggle} className="rounded border-slate-300" />
+      </td>
+
+      {/* Product Details */}
+      <td className="px-4 py-3.5">
+        <div className="flex items-start gap-3">
+          <img
+            src={order.productImage || `https://placehold.co/48x48/f1f5f9/64748b?text=P`}
+            alt=""
+            className="w-12 h-12 rounded object-cover bg-slate-100 flex-shrink-0 border border-slate-200"
+            onError={e => { e.target.src = `https://placehold.co/48x48/f1f5f9/64748b?text=P` }}
+          />
+          <div className="min-w-0">
+            <p className="text-indigo-600 hover:underline cursor-pointer font-medium text-sm leading-tight line-clamp-2">
+              {order.productName || 'Product Name'}
+            </p>
+            {order.isAd && (
+              <span className="inline-block text-[10px] font-semibold text-indigo-600 bg-indigo-50 border border-indigo-200 px-1.5 py-0.5 rounded mt-1">
+                🛍 Ad order
+              </span>
+            )}
+            <p className="text-xs text-slate-400 mt-1 font-mono">
+              {order.orderId}
+            </p>
+          </div>
+        </div>
+      </td>
+
+      {/* Sub-order ID */}
+      <td className="px-4 py-3.5">
+        <span className="text-xs text-slate-600 font-mono">{subOrderId}</span>
+      </td>
+
+      {/* SKU ID */}
+      <td className="px-4 py-3.5">
+        <span className="text-xs text-slate-600">{order.sku || '—'}</span>
+      </td>
+
+      {/* Meesho ID */}
+      <td className="px-4 py-3.5">
+        <span className="text-xs font-mono text-slate-700">{meeshoId}</span>
+      </td>
+
+      {/* Quantity */}
+      <td className="px-4 py-3.5 text-sm text-slate-700">{qty}</td>
+
+      {/* Size */}
+      <td className="px-4 py-3.5 text-sm text-slate-700">{size}</td>
+
+      {/* Dispatch Date / SLA */}
+      <td className="px-4 py-3.5">
+        {order.shipByDate ? (
+          <div className="space-y-1">
+            <p className="text-sm text-slate-700">{format(new Date(order.shipByDate), 'dd MMM yyyy')}</p>
+            <SLABadge shipByDate={order.shipByDate} />
+          </div>
+        ) : (
+          <span className="text-slate-400 text-xs">—</span>
+        )}
+      </td>
+
+      {/* Action */}
+      <td className="px-4 py-3.5">
+        {tab === 'pending' && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onAccept}
+              disabled={generateLabel.isPending}
+              className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-semibold"
+            >
+              Accept
+            </button>
+            <button
+              onClick={onCancel}
+              className="px-3 py-1.5 border border-slate-300 text-slate-600 hover:bg-slate-50 rounded text-xs font-semibold"
+            >
+              Cancel
+            </button>
           </div>
         )}
-      </Modal>
-    </div>
+        {tab === 'ready_to_ship' && (
+          <div className="flex flex-col items-start gap-1">
+            <button
+              onClick={onDownloadLabel}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-xs font-semibold"
+            >
+              <Printer size={12} /> Label
+            </button>
+            <span className={`text-[11px] font-medium ${labelDownloaded ? 'text-green-600' : 'text-slate-400'}`}>
+              {labelDownloaded ? '✓ Downloaded' : 'Not Downloaded'}
+            </span>
+          </div>
+        )}
+        {tab === 'shipped' && (
+          <span className="text-xs text-slate-500 bg-blue-50 border border-blue-200 px-2 py-1 rounded font-medium text-blue-600">Shipped</span>
+        )}
+        {tab === 'cancelled' && (
+          <span className="text-xs bg-slate-100 border border-slate-200 px-2 py-1 rounded text-slate-500">Cancelled</span>
+        )}
+        {tab === 'on_hold' && (
+          <button
+            onClick={onAccept}
+            className="px-3 py-1.5 bg-amber-500 hover:bg-amber-600 text-white rounded text-xs font-semibold"
+          >
+            Release
+          </button>
+        )}
+      </td>
+    </tr>
   )
 }
