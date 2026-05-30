@@ -39,7 +39,7 @@ async function syncAccount(accountId, userId) {
     const [orders, returns, products, payments] = await Promise.all([
       scraper.scrapeOrders(),
       scraper.scrapeReturns(),
-      scraper.scrapeProducts().catch(() => []),
+      scraper.scrapeInventory().catch(() => scraper.scrapeProducts().catch(() => [])),
       scraper.scrapePayments().catch(() => []),
     ]);
 

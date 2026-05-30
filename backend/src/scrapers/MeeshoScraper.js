@@ -341,6 +341,142 @@ class MeeshoScraper {
     return payments;
   }
 
+  // ─── INVENTORY ───────────────────────────────────────────────────────────
+
+  async scrapeInventory() {
+    await this._ensureSession();
+    const catalogs = [];
+    const page = await this._newPage(this.storedCookies);
+
+    page.on('response', async (response) => {
+      const url = response.url();
+      if (!url.includes('meesho') || response.status() !== 200) return;
+      if (!url.match(/inventory|catalog|listing/i)) return;
+      try {
+        const ct = response.headers()['content-type'] || '';
+        if (!ct.includes('json')) return;
+        const json = await response.json();
+        const rows = this._extractInventoryFromJson(json);
+        catalogs.push(...rows);
+      } catch {}
+    });
+
+    try {
+      await page.goto(`${SUPPLIER_URL}/inventory`, { waitUntil: 'networkidle2', timeout: 35000 });
+      await sleep(4000);
+      if (catalogs.length === 0) {
+        const rows = await page.evaluate(() => {
+          const results = [];
+          document.querySelectorAll('[data-testid*="catalog"], [class*="catalog" i]').forEach(el => {
+            const name = el.querySelector('[class*="name" i], h3, h4')?.textContent?.trim();
+            const id = el.querySelector('[class*="catalogId" i], [class*="catalog-id" i]')?.textContent?.trim();
+            if (name) results.push({ name, catalogId: id || '', skus: [] });
+          });
+          return results;
+        });
+        catalogs.push(...rows);
+      }
+    } finally {
+      await page.close().catch(() => {});
+    }
+    return catalogs;
+  }
+
+  _extractInventoryFromJson(json) {
+    const results = [];
+    const tryExtract = (obj) => {
+      if (!obj || typeof obj !== 'object') return;
+      if (Array.isArray(obj)) { obj.forEach(tryExtract); return; }
+      if (obj.catalog_id || obj.catalogId) {
+        results.push({
+          catalogId: String(obj.catalog_id || obj.catalogId || ''),
+          name: obj.name || obj.catalog_name || '',
+          category: obj.category || '',
+          skus: (obj.skus || obj.products || []).map(s => ({
+            sku: s.sku || s.sku_id || '',
+            name: s.name || s.product_name || '',
+            variation: s.variation || s.size || 'Free Size',
+            stock: s.stock || s.inventory || 0,
+            price: s.price || s.selling_price || 0,
+            styleId: s.style_id || '',
+          })),
+        });
+        return;
+      }
+      Object.values(obj).forEach(v => { if (typeof v === 'object') tryExtract(v); });
+    };
+    tryExtract(json);
+    return results;
+  }
+
+  // ─── ADVERTISEMENTS ───────────────────────────────────────────────────────
+
+  async scrapeAds() {
+    await this._ensureSession();
+    const ads = [];
+    const page = await this._newPage(this.storedCookies);
+
+    page.on('response', async (response) => {
+      const url = response.url();
+      if (!url.includes('meesho') || response.status() !== 200) return;
+      if (!url.match(/ad|campaign|advertisement/i)) return;
+      try {
+        const ct = response.headers()['content-type'] || '';
+        if (!ct.includes('json')) return;
+        const json = await response.json();
+        const rows = this._extractAdsFromJson(json);
+        ads.push(...rows);
+      } catch {}
+    });
+
+    try {
+      await page.goto(`${SUPPLIER_URL}/advertisement`, { waitUntil: 'networkidle2', timeout: 35000 });
+      await sleep(4000);
+      if (ads.length === 0) {
+        const rows = await page.evaluate(() => {
+          const results = [];
+          document.querySelectorAll('[data-testid*="campaign"], [class*="campaign" i]').forEach(el => {
+            const name = el.querySelector('[class*="name" i]')?.textContent?.trim();
+            if (name) results.push({ name, status: 'LIVE', budget: 0, budgetUtilized: 0 });
+          });
+          return results;
+        });
+        ads.push(...rows);
+      }
+    } finally {
+      await page.close().catch(() => {});
+    }
+    return ads;
+  }
+
+  _extractAdsFromJson(json) {
+    const results = [];
+    const tryExtract = (obj) => {
+      if (!obj || typeof obj !== 'object') return;
+      if (Array.isArray(obj)) { obj.forEach(tryExtract); return; }
+      if (obj.campaign_id || obj.campaignId || obj.ad_id) {
+        results.push({
+          campaignId: String(obj.campaign_id || obj.campaignId || obj.ad_id || ''),
+          name: obj.name || obj.campaign_name || '',
+          status: obj.status || 'LIVE',
+          budget: obj.budget || obj.daily_budget || 0,
+          budgetUtilized: obj.budget_utilized || obj.spend || 0,
+          impressions: obj.impressions || 0,
+          clicks: obj.clicks || 0,
+          orders: obj.orders || obj.order_count || 0,
+          revenue: obj.revenue || 0,
+          roi: obj.roi || obj.roas || 0,
+          startDate: obj.start_date || obj.startDate || '',
+          endDate: obj.end_date || obj.endDate || '',
+        });
+        return;
+      }
+      Object.values(obj).forEach(v => { if (typeof v === 'object') tryExtract(v); });
+    };
+    tryExtract(json);
+    return results;
+  }
+
   // ─── RETURN OTP ──────────────────────────────────────────────────────────
 
   async scrapeReturnOTP(returnId) {
