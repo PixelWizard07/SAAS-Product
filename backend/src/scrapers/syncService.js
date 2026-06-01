@@ -18,6 +18,12 @@ const { seedAccountData } = require('../controllers/seedController');
  * Falls back to seed data if scraping fails (demo/offline mode).
  */
 async function syncAccount(accountId, userId) {
+  // Guard: if MongoDB is not connected, bail early
+  if (!global.dbConnected) {
+    console.warn('[syncService] MongoDB not connected — skipping sync');
+    return { orders: 0, returns: 0, products: 0, payments: 0 };
+  }
+
   const account = await SellerAccount.findById(accountId).select('+encryptedPassword +sessionCookies');
   if (!account) throw new Error(`Account ${accountId} not found`);
 
