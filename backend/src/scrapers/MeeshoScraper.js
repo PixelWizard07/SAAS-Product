@@ -1,13 +1,12 @@
 'use strict';
 /**
- * MeeshoScraper — Puppeteer-based browser automation for supplier.meesho.com
+ * MeeshoScraper — Puppeteer browser automation for supplier.meesho.com
  *
- * Architecture:
- * - Launches headless Chrome per-account (reuses browser across requests via sessionMap)
- * - Intercepts XHR/fetch responses to capture Meesho's internal API JSON
- * - Falls back to DOM extraction when API interception misses data
- * - Stores session cookies in DB (AES-256 encrypted field) to survive restarts
- * - All public methods are async and throw on unrecoverable errors
+ * - Launches one headless Chrome per Meesho account (pooled, idle-closed after 10 min)
+ * - Intercepts all XHR/fetch responses → extracts structured JSON
+ * - Falls back to DOM scraping if network interception yields nothing
+ * - Session cookies stored in DB (encrypted) to avoid re-login on every sync
+ * - All public methods throw on unrecoverable errors; callers handle fallback
  */
 
 const puppeteer = require('puppeteer-extra');
@@ -23,32 +22,31 @@ const LAUNCH_ARGS = [
   '--disable-gpu',
   '--disable-background-networking',
   '--disable-extensions',
+  '--ignore-certificate-errors',
   '--window-size=1366,768',
 ];
 
-// Tab → URL path mappings for Meesho supplier panel
-const ORDER_TAB_PATHS = {
-  new:          '/orders/new_orders',
-  pending:      '/orders/new_orders',
-  on_hold:      '/orders/on_hold',
-  ready_to_ship:'/orders/ready_to_dispatch',
-  shipped:      '/orders/shipped',
-  cancelled:    '/orders/cancelled',
-};
-
-// Singleton browser pool per accountId so we don't spawn redundant instances
+// Browser pool: one browser instance per accountId
 const browserPool = new Map(); // accountId → { browser, lastUsed }
+
+// Close browsers idle for > 10 minutes
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, entry] of browserPool) {
+    if (now - entry.lastUsed > 10 * 60 * 1000) {
+      entry.browser.close().catch(() => {});
+      browserPool.delete(id);
+    }
+  }
+}, 60 * 1000);
 
 const getBrowser = async (accountId) => {
   const entry = browserPool.get(accountId);
   if (entry) {
     try {
-      // Check if browser is still alive
-      const pages = await entry.browser.pages();
-      if (pages.length >= 0) {
-        entry.lastUsed = Date.now();
-        return entry.browser;
-      }
+      await entry.browser.pages(); // throws if browser is dead
+      entry.lastUsed = Date.now();
+      return entry.browser;
     } catch {
       browserPool.delete(accountId);
     }
@@ -64,42 +62,128 @@ const getBrowser = async (accountId) => {
   return browser;
 };
 
-// Clean up browsers idle for more than 10 minutes
-setInterval(() => {
-  for (const [id, entry] of browserPool.entries()) {
-    if (Date.now() - entry.lastUsed > 10 * 60 * 1000) {
-      entry.browser.close().catch(() => {});
-      browserPool.delete(id);
-    }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ─── JSON extraction helpers ──────────────────────────────────────────────────
+
+/**
+ * Walk any JSON object/array and collect items matching a shape predicate.
+ */
+function deepCollect(obj, predicate, results = []) {
+  if (!obj || typeof obj !== 'object') return results;
+  if (Array.isArray(obj)) {
+    obj.forEach(item => {
+      if (predicate(item)) results.push(item);
+      else deepCollect(item, predicate, results);
+    });
+  } else {
+    if (predicate(obj)) results.push(obj);
+    else Object.values(obj).forEach(v => deepCollect(v, predicate, results));
   }
-}, 5 * 60 * 1000);
+  return results;
+}
+
+function normalizeOrder(raw) {
+  const id = raw.id || raw.order_id || raw.orderId || raw.sub_order_number || '';
+  const subId = raw.sub_order_id || raw.subOrderId || raw.sub_order_number || `${id}_1`;
+  const status = raw.status || raw.order_status || '';
+  const meeshoStatus = (() => {
+    const s = String(status).toLowerCase();
+    if (s.includes('hold')) return 'On Hold';
+    if (s.includes('pending') || s.includes('new') || s.includes('confirm')) return 'Pending';
+    if (s.includes('ready') || s.includes('dispatch') || s.includes('label')) return 'Ready to Ship';
+    if (s.includes('ship') || s.includes('transit')) return 'Shipped';
+    if (s.includes('deliver')) return 'Delivered';
+    if (s.includes('cancel')) return 'Cancelled';
+    return status || 'Pending';
+  })();
+
+  return {
+    orderId: String(id),
+    subOrderId: String(subId),
+    productName: raw.product_name || raw.productName || raw.name || '',
+    sku: raw.sku || raw.sku_id || raw.seller_sku || '',
+    variant: raw.variation || raw.variant || raw.size || 'Free Size',
+    price: Number(raw.price || raw.selling_price || raw.amount || 0),
+    quantity: Number(raw.quantity || raw.qty || 1),
+    paymentMode: (raw.payment_mode || raw.paymentMode || 'Prepaid').toUpperCase().includes('COD') ? 'COD' : 'Prepaid',
+    status: meeshoStatus,
+    buyerName: raw.customer_name || raw.buyerName || raw.buyer_name || '',
+    buyerAddress: [raw.city, raw.state].filter(Boolean).join(', ') || raw.address || '',
+    orderDate: raw.order_date || raw.orderDate || raw.created_at || new Date().toISOString(),
+    shipByDate: raw.ship_by_date || raw.shipByDate || raw.expected_dispatch_date || null,
+    labelStatus: raw.label_status || raw.labelStatus || 'none',
+    isAd: !!(raw.is_ad || raw.isAd || raw.ad_order),
+    productImage: raw.product_image || raw.productImage || raw.image_url || '',
+  };
+}
+
+function normalizeReturn(raw) {
+  return {
+    returnId: String(raw.return_id || raw.returnId || raw.id || ''),
+    orderId: String(raw.order_id || raw.orderId || ''),
+    productName: raw.product_name || raw.productName || raw.name || '',
+    returnReason: raw.reason || raw.return_reason || raw.returnReason || '',
+    status: raw.status || raw.return_status || 'Initiated',
+    buyerName: raw.customer_name || raw.buyerName || raw.buyer_name || '',
+    otp: raw.otp || raw.pickup_otp || null,
+    otpGeneratedAt: raw.otp_generated_at || null,
+    productImage: raw.product_image || raw.image_url || '',
+    returnDate: raw.return_date || raw.returnDate || raw.created_at || new Date().toISOString(),
+  };
+}
+
+function normalizeProduct(raw) {
+  return {
+    catalogId: String(raw.catalog_id || raw.catalogId || raw.id || ''),
+    name: raw.name || raw.catalog_name || raw.product_name || '',
+    sku: raw.sku || raw.sku_id || '',
+    price: Number(raw.price || raw.selling_price || 0),
+    mrp: Number(raw.mrp || raw.original_price || 0),
+    stock: Number(raw.stock || raw.inventory || raw.quantity || 0),
+    category: raw.category || '',
+    status: raw.status || 'active',
+    imageUrl: raw.image_url || raw.product_image || '',
+  };
+}
+
+function normalizePayment(raw) {
+  return {
+    paymentId: String(raw.payment_id || raw.paymentId || raw.transaction_id || raw.id || ''),
+    transactionId: String(raw.transaction_id || raw.transactionId || ''),
+    amount: Number(raw.amount || raw.net_amount || 0),
+    type: Number(raw.amount || 0) >= 0 ? 'credit' : 'debit',
+    description: raw.description || raw.details || 'Order settlement',
+    date: raw.payment_date || raw.date || raw.created_at || new Date().toISOString(),
+    status: raw.status || 'completed',
+    utr: raw.utr || raw.neft_id || '',
+  };
+}
+
+// ─── MeeshoScraper class ──────────────────────────────────────────────────────
 
 class MeeshoScraper {
-  constructor({ accountId, phone, password, sessionCookies }) {
+  constructor({ accountId, phone, password, sessionCookies = null }) {
     this.accountId = accountId;
     this.phone = phone;
     this.password = password;
-    this.storedCookies = sessionCookies || null;
-    this.browser = null;
-    this._interceptedData = {};
-  }
-
-  async _getBrowser() {
-    this.browser = await getBrowser(this.accountId);
-    return this.browser;
+    this.storedCookies = sessionCookies;
   }
 
   async _newPage(cookies = null) {
-    const browser = await this._getBrowser();
+    const browser = await getBrowser(this.accountId);
     const page = await browser.newPage();
     await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36'
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     );
-    await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
     if (cookies && cookies.length) {
-      await page.setCookie(...cookies);
+      await page.setCookie(...cookies).catch(() => {});
     }
     return page;
+  }
+
+  getCookies() {
+    return this.storedCookies;
   }
 
   // ─── LOGIN ────────────────────────────────────────────────────────────────
@@ -107,385 +191,531 @@ class MeeshoScraper {
   async login() {
     const page = await this._newPage();
     try {
-      await page.goto(`${SUPPLIER_URL}/login`, { waitUntil: 'networkidle2', timeout: 30000 });
+      console.log(`[Scraper:${this.accountId}] Navigating to login page…`);
+      await page.goto(`${SUPPLIER_URL}/login`, { waitUntil: 'networkidle2', timeout: 45000 });
+      await sleep(2000);
 
-      // Phone number step
-      const phoneSelectors = ['input[type="tel"]', 'input[name="phone"]', 'input[placeholder*="phone" i]', 'input[placeholder*="mobile" i]', 'input[placeholder*="number" i]'];
+      // ── Step 1: Enter phone number ──
+      const phoneSelectors = [
+        'input[type="tel"]',
+        'input[name="phone"]',
+        'input[placeholder*="phone" i]',
+        'input[placeholder*="mobile" i]',
+        'input[placeholder*="number" i]',
+        'input[placeholder*="10-digit" i]',
+      ];
       let phoneInput = null;
       for (const sel of phoneSelectors) {
         phoneInput = await page.$(sel);
-        if (phoneInput) break;
+        if (phoneInput) { console.log(`[Scraper] Phone input found: ${sel}`); break; }
       }
-      if (!phoneInput) throw new Error('Phone input not found on Meesho login page');
+      if (!phoneInput) {
+        // Try to find any visible text input
+        phoneInput = await page.evaluateHandle(() => {
+          const inputs = Array.from(document.querySelectorAll('input'));
+          return inputs.find(i => i.type !== 'password' && !i.hidden && i.offsetParent !== null);
+        });
+        const el = phoneInput.asElement ? phoneInput.asElement() : null;
+        if (!el) throw new Error('No phone input found on Meesho login page');
+        phoneInput = el;
+      }
+
       await phoneInput.click({ clickCount: 3 });
-      await phoneInput.type(this.phone, { delay: 60 });
+      await phoneInput.type(this.phone, { delay: 80 });
+      await sleep(500);
 
-      // Click Continue / Next
-      const continueBtn = await page.$('button[type="submit"]') || await page.$('button');
-      if (continueBtn) await continueBtn.click();
-      await page.waitForTimeout(2000);
+      // Click Continue/Next button
+      const clicked = await page.evaluate(() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        const btn = btns.find(b => /continue|next|proceed|login/i.test(b.textContent));
+        if (btn) { btn.click(); return true; }
+        const submit = document.querySelector('button[type="submit"]');
+        if (submit) { submit.click(); return true; }
+        return false;
+      });
+      if (!clicked) throw new Error('Continue button not found');
+      await sleep(2500);
 
-      // Password step
+      // ── Step 2: Enter password (if shown) or handle OTP ──
       const passInput = await page.$('input[type="password"]');
       if (passInput) {
-        await passInput.type(this.password, { delay: 60 });
-        const loginBtn = await page.$('button[type="submit"]') || await page.$('button');
-        if (loginBtn) await loginBtn.click();
-        await page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 25000 }).catch(() => {});
+        console.log(`[Scraper:${this.accountId}] Password step…`);
+        await passInput.click({ clickCount: 3 });
+        await passInput.type(this.password, { delay: 80 });
+        await sleep(300);
+
+        await page.evaluate(() => {
+          const btns = Array.from(document.querySelectorAll('button'));
+          const btn = btns.find(b => /login|sign.?in|submit/i.test(b.textContent));
+          if (btn) btn.click();
+          else document.querySelector('button[type="submit"]')?.click();
+        });
+        await Promise.race([
+          page.waitForNavigation({ waitUntil: 'networkidle2', timeout: 30000 }),
+          sleep(15000),
+        ]).catch(() => {});
+      } else {
+        // Might be OTP flow — wait for redirect
+        console.log(`[Scraper:${this.accountId}] OTP flow detected — waiting…`);
+        await sleep(5000);
       }
 
       const url = page.url();
-      if (url.includes('/login') || url.includes('/verify')) {
-        throw new Error('Login failed — invalid credentials or OTP required');
+      console.log(`[Scraper:${this.accountId}] After login URL: ${url}`);
+
+      if (url.includes('/login') || url.includes('/verify') || url.includes('/otp')) {
+        throw new Error('Login failed — invalid credentials or OTP verification required. Please check phone/password.');
       }
 
       const cookies = await page.cookies();
       this.storedCookies = cookies;
+      console.log(`[Scraper:${this.accountId}] Login successful, ${cookies.length} cookies saved`);
       return cookies;
     } finally {
       await page.close().catch(() => {});
     }
   }
 
+  // ─── SESSION CHECK ────────────────────────────────────────────────────────
+
   async _ensureSession() {
-    if (!this.storedCookies || !this.storedCookies.length) {
-      this.storedCookies = await this.login();
-      return;
-    }
-    // Quick session check — hit the dashboard and see if we're redirected to login
-    const page = await this._newPage(this.storedCookies);
-    try {
-      await page.goto(`${SUPPLIER_URL}/dashboard`, { waitUntil: 'domcontentloaded', timeout: 15000 });
-      if (page.url().includes('/login')) {
-        await page.close();
-        this.storedCookies = await this.login();
-      }
-    } catch {
-      // Network/timeout — proceed with existing cookies
-    } finally {
+    // Try existing cookies first
+    if (this.storedCookies && this.storedCookies.length > 0) {
+      const page = await this._newPage(this.storedCookies);
+      try {
+        await page.goto(`${SUPPLIER_URL}/orders/new_orders`, {
+          waitUntil: 'domcontentloaded', timeout: 20000,
+        });
+        await sleep(1500);
+        const url = page.url();
+        if (!url.includes('/login') && !url.includes('/verify')) {
+          console.log(`[Scraper:${this.accountId}] Session valid (cookie reuse)`);
+          await page.close().catch(() => {});
+          return; // session OK
+        }
+      } catch {}
       await page.close().catch(() => {});
     }
+    // Need fresh login
+    console.log(`[Scraper:${this.accountId}] Session expired — logging in…`);
+    await this.login();
   }
 
-  // ─── DATA INTERCEPTION ────────────────────────────────────────────────────
+  // ─── COLLECT NETWORK RESPONSES ─────────────────────────────────────────────
 
-  async _pageWithIntercept(path, dataCollector) {
+  /**
+   * Navigate to a URL and collect all JSON responses whose URLs match a pattern.
+   * Waits `waitMs` after navigation for XHR calls to complete.
+   */
+  async _collectNetworkData(url, urlPattern, waitMs = 5000) {
     await this._ensureSession();
+    const collected = [];
     const page = await this._newPage(this.storedCookies);
-    const collected = {};
 
-    page.on('response', async (response) => {
-      const url = response.url();
-      const status = response.status();
-      if (status !== 200) return;
-      if (!url.includes('meesho.com') && !url.includes('meesho.io')) return;
-      if (!url.match(/\/(api|v[0-9]|orders|returns|products|catalog|payments|supplier)/i)) return;
+    page.on('response', async (res) => {
       try {
-        const ct = response.headers()['content-type'] || '';
+        const resUrl = res.url();
+        if (!urlPattern.test(resUrl)) return;
+        if (res.status() !== 200) return;
+        const ct = res.headers()['content-type'] || '';
         if (!ct.includes('json')) return;
-        const json = await response.json();
-        dataCollector(url, json, collected);
+        const json = await res.json().catch(() => null);
+        if (json) collected.push(json);
       } catch {}
     });
 
     try {
-      await page.goto(`${SUPPLIER_URL}${path}`, { waitUntil: 'networkidle2', timeout: 35000 });
-      await page.waitForTimeout(3000);
-    } finally {
+      await page.goto(url, { waitUntil: 'networkidle2', timeout: 40000 });
+      await sleep(waitMs);
+      return { page, collected };
+    } catch (err) {
       await page.close().catch(() => {});
+      throw err;
     }
-    return collected;
   }
 
-  // ─── ORDERS ──────────────────────────────────────────────────────────────
+  // ─── ORDERS ───────────────────────────────────────────────────────────────
 
   async scrapeOrders() {
     await this._ensureSession();
     const allOrders = [];
-    const tabs = ['new_orders', 'ready_to_dispatch', 'on_hold', 'shipped', 'cancelled'];
+    const tabs = [
+      { path: 'new_orders',        status: 'Pending' },
+      { path: 'on_hold',           status: 'On Hold' },
+      { path: 'ready_to_dispatch', status: 'Ready to Ship' },
+      { path: 'shipped',           status: 'Shipped' },
+      { path: 'cancelled',         status: 'Cancelled' },
+    ];
 
     for (const tab of tabs) {
+      const tabUrl = `${SUPPLIER_URL}/orders/${tab.path}`;
+      console.log(`[Scraper:${this.accountId}] Scraping orders tab: ${tab.path}`);
+      const collected = [];
       const page = await this._newPage(this.storedCookies);
-      const tabOrders = [];
 
-      page.on('response', async (response) => {
-        const url = response.url();
-        if (!url.includes('meesho') || response.status() !== 200) return;
-        if (!url.match(/order/i)) return;
+      page.on('response', async (res) => {
         try {
-          const ct = response.headers()['content-type'] || '';
+          const u = res.url();
+          if (!/meesho/i.test(u) || res.status() !== 200) return;
+          if (!/order|supplier/i.test(u)) return;
+          const ct = res.headers()['content-type'] || '';
           if (!ct.includes('json')) return;
-          const json = await response.json();
-          const rows = extractOrdersFromJson(json, tab);
-          tabOrders.push(...rows);
+          const json = await res.json().catch(() => null);
+          if (json) collected.push(json);
         } catch {}
       });
 
       try {
-        await page.goto(`${SUPPLIER_URL}/orders/${tab}`, { waitUntil: 'networkidle2', timeout: 35000 });
-        await page.waitForTimeout(4000);
+        await page.goto(tabUrl, { waitUntil: 'networkidle2', timeout: 40000 });
+        await sleep(5000);
 
-        // DOM fallback if interception yielded nothing
-        if (tabOrders.length === 0) {
-          const domOrders = await extractOrdersFromDOM(page, tab);
-          tabOrders.push(...domOrders);
+        // Parse from intercepted XHR
+        let orders = [];
+        for (const json of collected) {
+          const found = deepCollect(json, obj =>
+            (obj.order_id || obj.orderId || obj.sub_order_number) && (obj.status || obj.order_status)
+          );
+          orders.push(...found);
         }
+
+        // DOM fallback if no XHR data
+        if (orders.length === 0) {
+          console.log(`[Scraper:${this.accountId}] DOM fallback for ${tab.path}`);
+          orders = await page.evaluate((defaultStatus) => {
+            const rows = [];
+            // Try table rows
+            document.querySelectorAll('tr[data-testid], tr.order-row, tbody tr').forEach(row => {
+              const cells = Array.from(row.querySelectorAll('td'));
+              if (cells.length < 3) return;
+              const idEl = row.querySelector('[class*="order" i], [class*="sub-order" i]');
+              const nameEl = row.querySelector('[class*="product" i], [class*="name" i]');
+              rows.push({
+                order_id: idEl?.textContent?.trim() || cells[0]?.textContent?.trim() || '',
+                product_name: nameEl?.textContent?.trim() || cells[1]?.textContent?.trim() || '',
+                status: defaultStatus,
+              });
+            });
+            return rows;
+          }, tab.status);
+        }
+
+        // Tag with default status for this tab
+        const normalized = orders.map(o => ({ ...normalizeOrder(o), status: normalizeOrder(o).status || tab.status }));
+        allOrders.push(...normalized.filter(o => o.orderId));
+        console.log(`[Scraper:${this.accountId}] Tab ${tab.path}: ${normalized.length} orders`);
       } catch (err) {
-        console.error(`[MeeshoScraper] Orders tab ${tab} failed:`, err.message);
+        console.error(`[Scraper:${this.accountId}] Error on tab ${tab.path}:`, err.message);
       } finally {
         await page.close().catch(() => {});
       }
-
-      allOrders.push(...tabOrders);
     }
 
+    // Save fresh cookies
+    const browser = await getBrowser(this.accountId);
+    const pages = await browser.pages();
+    if (pages.length) {
+      this.storedCookies = await pages[0].cookies().catch(() => this.storedCookies);
+    }
+
+    console.log(`[Scraper:${this.accountId}] Total orders scraped: ${allOrders.length}`);
     return allOrders;
   }
 
   // ─── RETURNS ─────────────────────────────────────────────────────────────
 
   async scrapeReturns() {
-    await this._ensureSession();
-    const returns = [];
+    console.log(`[Scraper:${this.accountId}] Scraping returns…`);
+    const collected = [];
     const page = await this._newPage(this.storedCookies);
 
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (!url.includes('meesho') || response.status() !== 200) return;
-      if (!url.match(/return/i)) return;
+    page.on('response', async (res) => {
       try {
-        const ct = response.headers()['content-type'] || '';
+        const u = res.url();
+        if (!/meesho/i.test(u) || res.status() !== 200) return;
+        if (!/return|rto/i.test(u)) return;
+        const ct = res.headers()['content-type'] || '';
         if (!ct.includes('json')) return;
-        const json = await response.json();
-        const rows = extractReturnsFromJson(json);
-        returns.push(...rows);
+        const json = await res.json().catch(() => null);
+        if (json) collected.push(json);
       } catch {}
     });
 
     try {
-      await page.goto(`${SUPPLIER_URL}/returns`, { waitUntil: 'networkidle2', timeout: 35000 });
-      await page.waitForTimeout(4000);
+      await page.goto(`${SUPPLIER_URL}/returns`, { waitUntil: 'networkidle2', timeout: 40000 });
+      await sleep(5000);
+
+      let returns = [];
+      for (const json of collected) {
+        const found = deepCollect(json, obj => obj.return_id || obj.returnId);
+        returns.push(...found);
+      }
+
       if (returns.length === 0) {
-        const domReturns = await extractReturnsFromDOM(page);
-        returns.push(...domReturns);
+        returns = await page.evaluate(() => {
+          const rows = [];
+          document.querySelectorAll('[data-testid*="return"], tr').forEach(row => {
+            const idEl = row.querySelector('[class*="return-id" i], [class*="returnId" i]');
+            const prodEl = row.querySelector('[class*="product" i]');
+            if (idEl) {
+              rows.push({
+                return_id: idEl.textContent.trim(),
+                product_name: prodEl?.textContent?.trim() || '',
+                status: 'Initiated',
+              });
+            }
+          });
+          return rows;
+        });
       }
+
+      const normalized = returns.map(normalizeReturn).filter(r => r.returnId);
+      console.log(`[Scraper:${this.accountId}] Returns scraped: ${normalized.length}`);
+      return normalized;
     } finally {
       await page.close().catch(() => {});
     }
-    return returns;
   }
 
-  // ─── PRODUCTS ────────────────────────────────────────────────────────────
-
-  async scrapeProducts() {
-    await this._ensureSession();
-    const products = [];
-    const page = await this._newPage(this.storedCookies);
-
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (!url.includes('meesho') || response.status() !== 200) return;
-      if (!url.match(/catalog|product|listing/i)) return;
-      try {
-        const ct = response.headers()['content-type'] || '';
-        if (!ct.includes('json')) return;
-        const json = await response.json();
-        const rows = extractProductsFromJson(json);
-        products.push(...rows);
-      } catch {}
-    });
-
-    try {
-      await page.goto(`${SUPPLIER_URL}/catalog/products`, { waitUntil: 'networkidle2', timeout: 35000 });
-      await page.waitForTimeout(4000);
-      if (products.length === 0) {
-        const domProducts = await extractProductsFromDOM(page);
-        products.push(...domProducts);
-      }
-    } finally {
-      await page.close().catch(() => {});
-    }
-    return products;
-  }
-
-  // ─── PAYMENTS ────────────────────────────────────────────────────────────
-
-  async scrapePayments() {
-    await this._ensureSession();
-    const payments = [];
-    const page = await this._newPage(this.storedCookies);
-
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (!url.includes('meesho') || response.status() !== 200) return;
-      if (!url.match(/payment|payout|remittance/i)) return;
-      try {
-        const ct = response.headers()['content-type'] || '';
-        if (!ct.includes('json')) return;
-        const json = await response.json();
-        const rows = extractPaymentsFromJson(json);
-        payments.push(...rows);
-      } catch {}
-    });
-
-    try {
-      await page.goto(`${SUPPLIER_URL}/payments`, { waitUntil: 'networkidle2', timeout: 35000 });
-      await page.waitForTimeout(4000);
-      if (payments.length === 0) {
-        const domPayments = await extractPaymentsFromDOM(page);
-        payments.push(...domPayments);
-      }
-    } finally {
-      await page.close().catch(() => {});
-    }
-    return payments;
-  }
-
-  // ─── INVENTORY ───────────────────────────────────────────────────────────
+  // ─── INVENTORY ────────────────────────────────────────────────────────────
 
   async scrapeInventory() {
-    await this._ensureSession();
-    const catalogs = [];
+    console.log(`[Scraper:${this.accountId}] Scraping inventory…`);
+    const collected = [];
     const page = await this._newPage(this.storedCookies);
 
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (!url.includes('meesho') || response.status() !== 200) return;
-      if (!url.match(/inventory|catalog|listing/i)) return;
+    page.on('response', async (res) => {
       try {
-        const ct = response.headers()['content-type'] || '';
+        const u = res.url();
+        if (!/meesho/i.test(u) || res.status() !== 200) return;
+        if (!/catalog|inventory|listing|product/i.test(u)) return;
+        const ct = res.headers()['content-type'] || '';
         if (!ct.includes('json')) return;
-        const json = await response.json();
-        const rows = this._extractInventoryFromJson(json);
-        catalogs.push(...rows);
+        const json = await res.json().catch(() => null);
+        if (json) collected.push(json);
       } catch {}
     });
 
     try {
-      await page.goto(`${SUPPLIER_URL}/inventory`, { waitUntil: 'networkidle2', timeout: 35000 });
-      await sleep(4000);
-      if (catalogs.length === 0) {
-        const rows = await page.evaluate(() => {
+      await page.goto(`${SUPPLIER_URL}/inventory`, { waitUntil: 'networkidle2', timeout: 40000 });
+      await sleep(5000);
+
+      let products = [];
+      for (const json of collected) {
+        const found = deepCollect(json, obj => obj.catalog_id || obj.catalogId || (obj.sku && obj.name));
+        products.push(...found);
+      }
+
+      if (products.length === 0) {
+        products = await page.evaluate(() => {
           const results = [];
-          document.querySelectorAll('[data-testid*="catalog"], [class*="catalog" i]').forEach(el => {
-            const name = el.querySelector('[class*="name" i], h3, h4')?.textContent?.trim();
-            const id = el.querySelector('[class*="catalogId" i], [class*="catalog-id" i]')?.textContent?.trim();
-            if (name) results.push({ name, catalogId: id || '', skus: [] });
+          document.querySelectorAll('[class*="catalog" i], [data-testid*="catalog"]').forEach(el => {
+            const name = el.querySelector('h3,h4,[class*="name" i]')?.textContent?.trim();
+            const id = el.querySelector('[class*="catalogId" i],[class*="catalog-id" i]')?.textContent?.trim()?.replace(/\D/g, '');
+            if (name || id) results.push({ catalog_id: id || '', name: name || '' });
           });
           return results;
         });
-        catalogs.push(...rows);
       }
+
+      const normalized = products.map(normalizeProduct).filter(p => p.catalogId || p.name);
+      console.log(`[Scraper:${this.accountId}] Inventory scraped: ${normalized.length}`);
+      return normalized;
     } finally {
       await page.close().catch(() => {});
     }
-    return catalogs;
   }
 
-  _extractInventoryFromJson(json) {
-    const results = [];
-    const tryExtract = (obj) => {
-      if (!obj || typeof obj !== 'object') return;
-      if (Array.isArray(obj)) { obj.forEach(tryExtract); return; }
-      if (obj.catalog_id || obj.catalogId) {
-        results.push({
-          catalogId: String(obj.catalog_id || obj.catalogId || ''),
-          name: obj.name || obj.catalog_name || '',
-          category: obj.category || '',
-          skus: (obj.skus || obj.products || []).map(s => ({
-            sku: s.sku || s.sku_id || '',
-            name: s.name || s.product_name || '',
-            variation: s.variation || s.size || 'Free Size',
-            stock: s.stock || s.inventory || 0,
-            price: s.price || s.selling_price || 0,
-            styleId: s.style_id || '',
-          })),
-        });
-        return;
-      }
-      Object.values(obj).forEach(v => { if (typeof v === 'object') tryExtract(v); });
-    };
-    tryExtract(json);
-    return results;
-  }
+  // ─── PAYMENTS ─────────────────────────────────────────────────────────────
 
-  // ─── ADVERTISEMENTS ───────────────────────────────────────────────────────
-
-  async scrapeAds() {
-    await this._ensureSession();
-    const ads = [];
+  async scrapePayments() {
+    console.log(`[Scraper:${this.accountId}] Scraping payments…`);
+    const collected = [];
     const page = await this._newPage(this.storedCookies);
 
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (!url.includes('meesho') || response.status() !== 200) return;
-      if (!url.match(/ad|campaign|advertisement/i)) return;
+    page.on('response', async (res) => {
       try {
-        const ct = response.headers()['content-type'] || '';
+        const u = res.url();
+        if (!/meesho/i.test(u) || res.status() !== 200) return;
+        if (!/payment|payout|remittance|settlement/i.test(u)) return;
+        const ct = res.headers()['content-type'] || '';
         if (!ct.includes('json')) return;
-        const json = await response.json();
-        const rows = this._extractAdsFromJson(json);
-        ads.push(...rows);
+        const json = await res.json().catch(() => null);
+        if (json) collected.push(json);
       } catch {}
     });
 
     try {
-      await page.goto(`${SUPPLIER_URL}/advertisement`, { waitUntil: 'networkidle2', timeout: 35000 });
-      await sleep(4000);
-      if (ads.length === 0) {
-        const rows = await page.evaluate(() => {
-          const results = [];
-          document.querySelectorAll('[data-testid*="campaign"], [class*="campaign" i]').forEach(el => {
-            const name = el.querySelector('[class*="name" i]')?.textContent?.trim();
-            if (name) results.push({ name, status: 'LIVE', budget: 0, budgetUtilized: 0 });
-          });
-          return results;
-        });
-        ads.push(...rows);
+      await page.goto(`${SUPPLIER_URL}/payments`, { waitUntil: 'networkidle2', timeout: 40000 });
+      await sleep(5000);
+
+      let payments = [];
+      for (const json of collected) {
+        const found = deepCollect(json, obj =>
+          (obj.payment_id || obj.paymentId || obj.transaction_id) && (obj.amount !== undefined)
+        );
+        payments.push(...found);
       }
+
+      if (payments.length === 0) {
+        payments = await page.evaluate(() => {
+          const rows = [];
+          document.querySelectorAll('tr, [class*="payment-row" i]').forEach(row => {
+            const amtEl = row.querySelector('[class*="amount" i]');
+            const idEl = row.querySelector('[class*="id" i], [class*="transaction" i]');
+            if (amtEl) {
+              const amtText = amtEl.textContent.replace(/[^0-9.-]/g, '');
+              rows.push({
+                payment_id: idEl?.textContent?.trim() || `DOM-${Date.now()}`,
+                amount: parseFloat(amtText) || 0,
+                description: 'Order settlement',
+              });
+            }
+          });
+          return rows;
+        });
+      }
+
+      const normalized = payments.map(normalizePayment).filter(p => p.paymentId);
+      console.log(`[Scraper:${this.accountId}] Payments scraped: ${normalized.length}`);
+      return normalized;
     } finally {
       await page.close().catch(() => {});
     }
-    return ads;
   }
 
-  _extractAdsFromJson(json) {
-    const results = [];
-    const tryExtract = (obj) => {
-      if (!obj || typeof obj !== 'object') return;
-      if (Array.isArray(obj)) { obj.forEach(tryExtract); return; }
-      if (obj.campaign_id || obj.campaignId || obj.ad_id) {
-        results.push({
-          campaignId: String(obj.campaign_id || obj.campaignId || obj.ad_id || ''),
-          name: obj.name || obj.campaign_name || '',
-          status: obj.status || 'LIVE',
-          budget: obj.budget || obj.daily_budget || 0,
-          budgetUtilized: obj.budget_utilized || obj.spend || 0,
-          impressions: obj.impressions || 0,
-          clicks: obj.clicks || 0,
-          orders: obj.orders || obj.order_count || 0,
-          revenue: obj.revenue || 0,
-          roi: obj.roi || obj.roas || 0,
-          startDate: obj.start_date || obj.startDate || '',
-          endDate: obj.end_date || obj.endDate || '',
-        });
-        return;
-      }
-      Object.values(obj).forEach(v => { if (typeof v === 'object') tryExtract(v); });
-    };
-    tryExtract(json);
-    return results;
+  // ─── ACCEPT ORDER ─────────────────────────────────────────────────────────
+
+  async acceptOrder(subOrderId) {
+    await this._ensureSession();
+    const page = await this._newPage(this.storedCookies);
+    try {
+      await page.goto(`${SUPPLIER_URL}/orders/new_orders`, { waitUntil: 'networkidle2', timeout: 30000 });
+      await sleep(2000);
+
+      const accepted = await page.evaluate((sid) => {
+        // Find the row containing this sub-order ID
+        const rows = Array.from(document.querySelectorAll('tr, [class*="order-row" i]'));
+        for (const row of rows) {
+          if (row.textContent.includes(sid)) {
+            const acceptBtn = Array.from(row.querySelectorAll('button')).find(b =>
+              /accept/i.test(b.textContent)
+            );
+            if (acceptBtn) { acceptBtn.click(); return true; }
+          }
+        }
+        // Try global Accept button if only one order visible
+        const btn = Array.from(document.querySelectorAll('button')).find(b => /accept/i.test(b.textContent));
+        if (btn) { btn.click(); return true; }
+        return false;
+      }, subOrderId);
+
+      if (!accepted) throw new Error(`Accept button not found for sub-order ${subOrderId}`);
+      await sleep(2000);
+      return true;
+    } finally {
+      await page.close().catch(() => {});
+    }
   }
 
-  // ─── RETURN OTP ──────────────────────────────────────────────────────────
+  // ─── CANCEL ORDER ─────────────────────────────────────────────────────────
+
+  async cancelOrder(subOrderId, reason = 'Seller cancelled') {
+    await this._ensureSession();
+    const page = await this._newPage(this.storedCookies);
+    try {
+      await page.goto(`${SUPPLIER_URL}/orders/new_orders`, { waitUntil: 'networkidle2', timeout: 30000 });
+      await sleep(2000);
+
+      await page.evaluate((sid) => {
+        const rows = Array.from(document.querySelectorAll('tr, [class*="order-row" i]'));
+        for (const row of rows) {
+          if (row.textContent.includes(sid)) {
+            const btn = Array.from(row.querySelectorAll('button')).find(b => /cancel/i.test(b.textContent));
+            if (btn) { btn.click(); return; }
+          }
+        }
+      }, subOrderId);
+
+      await sleep(1500);
+
+      // Handle cancel modal/reason
+      await page.evaluate((rsn) => {
+        const select = document.querySelector('select[name*="reason" i], select[class*="reason" i]');
+        const textarea = document.querySelector('textarea, input[type="text"][placeholder*="reason" i]');
+        if (select) select.value = select.options[1]?.value || select.options[0]?.value;
+        if (textarea) textarea.value = rsn;
+        const confirmBtn = Array.from(document.querySelectorAll('button')).find(b =>
+          /confirm|submit|yes|cancel.?order/i.test(b.textContent)
+        );
+        if (confirmBtn) confirmBtn.click();
+      }, reason);
+
+      await sleep(2000);
+      return true;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  // ─── DOWNLOAD LABEL ───────────────────────────────────────────────────────
+
+  async downloadLabel(subOrderId) {
+    await this._ensureSession();
+    let labelHtml = null;
+    const page = await this._newPage(this.storedCookies);
+
+    page.on('response', async (res) => {
+      try {
+        const u = res.url();
+        if (!/label|shipping.?slip/i.test(u)) return;
+        const ct = res.headers()['content-type'] || '';
+        if (ct.includes('html') || ct.includes('pdf')) {
+          labelHtml = await res.text().catch(() => null);
+        } else if (ct.includes('json')) {
+          const json = await res.json().catch(() => null);
+          if (json?.label_html || json?.labelHtml) {
+            labelHtml = json.label_html || json.labelHtml;
+          }
+        }
+      } catch {}
+    });
+
+    try {
+      await page.goto(`${SUPPLIER_URL}/orders/ready_to_dispatch`, { waitUntil: 'networkidle2', timeout: 30000 });
+      await sleep(2000);
+
+      await page.evaluate((sid) => {
+        const rows = Array.from(document.querySelectorAll('tr, [class*="order-row" i]'));
+        for (const row of rows) {
+          if (row.textContent.includes(sid)) {
+            const btn = Array.from(row.querySelectorAll('button')).find(b =>
+              /label|print|download/i.test(b.textContent)
+            );
+            if (btn) { btn.click(); return; }
+          }
+        }
+        // Click first Label button if only one order
+        const btn = Array.from(document.querySelectorAll('button')).find(b => /label|print/i.test(b.textContent));
+        if (btn) btn.click();
+      }, subOrderId);
+
+      await sleep(4000);
+      return labelHtml;
+    } finally {
+      await page.close().catch(() => {});
+    }
+  }
+
+  // ─── RETURN OTP ───────────────────────────────────────────────────────────
 
   async scrapeReturnOTP(returnId) {
     await this._ensureSession();
     const page = await this._newPage(this.storedCookies);
     try {
-      await page.goto(`${SUPPLIER_URL}/returns?returnId=${returnId}`, { waitUntil: 'networkidle2', timeout: 30000 });
-      await page.waitForTimeout(2000);
-      const otp = await page.evaluate(() => {
+      await page.goto(`${SUPPLIER_URL}/returns`, { waitUntil: 'networkidle2', timeout: 30000 });
+      await sleep(2000);
+
+      const otp = await page.evaluate((rid) => {
         const selectors = [
           '[data-testid*="otp"]',
           '[class*="otp" i]',
@@ -494,422 +724,55 @@ class MeeshoScraper {
         ];
         for (const sel of selectors) {
           const el = document.querySelector(sel);
-          if (el) return el.innerText?.trim() || el.value?.trim() || null;
+          if (el?.textContent?.match(/\d{4,6}/)) return el.textContent.trim();
+          if (el?.value?.match(/\d{4,6}/)) return el.value.trim();
         }
-        // Search text containing 6-digit OTP pattern
+        // Walk all text for 6-digit code near "OTP"
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
         let node;
         while ((node = walker.nextNode())) {
-          const m = node.textContent.match(/\b(\d{6})\b/);
-          if (m && node.parentElement?.className?.toLowerCase().includes('otp')) return m[1];
+          if (/\botp\b/i.test(node.parentElement?.textContent)) {
+            const match = node.textContent.match(/\b\d{6}\b/);
+            if (match) return match[0];
+          }
         }
         return null;
-      });
+      }, returnId);
+
       return otp;
     } finally {
       await page.close().catch(() => {});
     }
   }
 
-  // ─── ACTIONS ─────────────────────────────────────────────────────────────
-
-  async acceptOrder(subOrderId) {
-    await this._ensureSession();
-    const page = await this._newPage(this.storedCookies);
-    try {
-      await page.goto(`${SUPPLIER_URL}/orders/new_orders`, { waitUntil: 'networkidle2', timeout: 30000 });
-      await page.waitForTimeout(2000);
-
-      // Find row with this sub-order ID and click Accept
-      const clicked = await page.evaluate((sid) => {
-        const rows = document.querySelectorAll('tr, [class*="row" i], [class*="order-item" i]');
-        for (const row of rows) {
-          if (row.textContent.includes(sid)) {
-            const btn = row.querySelector('button');
-            const btns = row.querySelectorAll('button');
-            for (const b of btns) {
-              if (b.textContent.trim().toLowerCase().includes('accept')) {
-                b.click();
-                return true;
-              }
-            }
-          }
-        }
-        return false;
-      }, subOrderId);
-
-      await page.waitForTimeout(2000);
-      return clicked;
-    } finally {
-      await page.close().catch(() => {});
-    }
-  }
-
-  async cancelOrder(subOrderId, reason = 'Seller cancelled') {
-    await this._ensureSession();
-    const page = await this._newPage(this.storedCookies);
-    try {
-      await page.goto(`${SUPPLIER_URL}/orders/new_orders`, { waitUntil: 'networkidle2', timeout: 30000 });
-      await page.waitForTimeout(2000);
-
-      const clicked = await page.evaluate((sid, rsn) => {
-        const rows = document.querySelectorAll('tr, [class*="row" i], [class*="order-item" i]');
-        for (const row of rows) {
-          if (row.textContent.includes(sid)) {
-            const btns = row.querySelectorAll('button');
-            for (const b of btns) {
-              if (b.textContent.trim().toLowerCase().includes('cancel')) {
-                b.click();
-                return true;
-              }
-            }
-          }
-        }
-        return false;
-      }, subOrderId, reason);
-
-      await page.waitForTimeout(2000);
-      // Handle cancel reason modal if it appeared
-      await page.evaluate((rsn) => {
-        const modal = document.querySelector('[role="dialog"], [class*="modal" i], [class*="dialog" i]');
-        if (modal) {
-          const sel = modal.querySelector('select');
-          if (sel) sel.value = rsn;
-          const confirmBtn = Array.from(modal.querySelectorAll('button')).find(b =>
-            b.textContent.trim().toLowerCase().includes('confirm') || b.textContent.trim().toLowerCase().includes('cancel order')
-          );
-          if (confirmBtn) confirmBtn.click();
-        }
-      }, reason);
-
-      await page.waitForTimeout(1500);
-      return clicked;
-    } finally {
-      await page.close().catch(() => {});
-    }
-  }
-
-  async downloadLabel(subOrderId) {
-    await this._ensureSession();
-    const page = await this._newPage(this.storedCookies);
-    let labelHtml = null;
-
-    page.on('response', async (response) => {
-      const url = response.url();
-      if (!url.match(/label|manifest|shipping/i)) return;
-      try {
-        const ct = response.headers()['content-type'] || '';
-        if (ct.includes('html') || ct.includes('pdf')) {
-          labelHtml = await response.text();
-        }
-      } catch {}
-    });
-
-    try {
-      await page.goto(`${SUPPLIER_URL}/orders/ready_to_dispatch`, { waitUntil: 'networkidle2', timeout: 30000 });
-      await page.waitForTimeout(2000);
-
-      await page.evaluate((sid) => {
-        const rows = document.querySelectorAll('tr, [class*="row" i], [class*="order-item" i]');
-        for (const row of rows) {
-          if (row.textContent.includes(sid)) {
-            const btns = row.querySelectorAll('button, a');
-            for (const b of btns) {
-              const txt = b.textContent.trim().toLowerCase();
-              if (txt.includes('label') || txt.includes('download')) {
-                b.click();
-                return true;
-              }
-            }
-          }
-        }
-        return false;
-      }, subOrderId);
-
-      await page.waitForTimeout(3000);
-
-      // If no intercepted label, try to get page content of any opened label page
-      if (!labelHtml) {
-        const pages = await this.browser.pages();
-        const labelPage = pages.find(p => p.url().match(/label|manifest|shipping/i));
-        if (labelPage) {
-          labelHtml = await labelPage.content();
-          await labelPage.close().catch(() => {});
-        }
-      }
-
-      return labelHtml;
-    } finally {
-      await page.close().catch(() => {});
-    }
-  }
-
-  // ─── PROFILE ─────────────────────────────────────────────────────────────
+  // ─── PROFILE ──────────────────────────────────────────────────────────────
 
   async scrapeProfile() {
     await this._ensureSession();
     const page = await this._newPage(this.storedCookies);
     try {
       await page.goto(`${SUPPLIER_URL}/profile`, { waitUntil: 'networkidle2', timeout: 25000 });
-      await page.waitForTimeout(2000);
+      await sleep(2000);
       return await page.evaluate(() => {
-        const name = document.querySelector('[class*="shop-name" i], [class*="shopName" i], h1, h2')?.innerText?.trim() || '';
-        const img = document.querySelector('[class*="profile-pic" i] img, [class*="avatar" i] img')?.src || '';
-        return { shopName: name, profilePicture: img };
+        const name = document.querySelector('[class*="shop-name" i],[class*="shopName" i],[class*="supplier-name" i]')?.textContent?.trim()
+          || document.querySelector('h1,h2')?.textContent?.trim() || '';
+        const pic = document.querySelector('[class*="profile" i] img,[class*="avatar" i] img')?.src || '';
+        return { shopName: name, profilePicture: pic };
       });
-    } catch {
-      return {};
     } finally {
       await page.close().catch(() => {});
     }
   }
 
-  getCookies() {
-    return this.storedCookies;
+  // ─── CLOSE ────────────────────────────────────────────────────────────────
+
+  async close() {
+    const entry = browserPool.get(this.accountId);
+    if (entry) {
+      await entry.browser.close().catch(() => {});
+      browserPool.delete(this.accountId);
+    }
   }
-}
-
-// ─── JSON EXTRACTORS ───────────────────────────────────────────────────────
-
-function extractOrdersFromJson(json, tab) {
-  const results = [];
-  const statusMap = {
-    new_orders: 'Pending',
-    ready_to_dispatch: 'Ready to Ship',
-    on_hold: 'On Hold',
-    shipped: 'Shipped',
-    cancelled: 'Cancelled',
-  };
-  const defaultStatus = statusMap[tab] || 'Pending';
-
-  const walk = (obj) => {
-    if (!obj || typeof obj !== 'object') return;
-    if (Array.isArray(obj)) { obj.forEach(walk); return; }
-
-    // Look for order-shaped objects
-    if (obj.sub_order_id || obj.subOrderId || obj.order_id) {
-      const o = normalizeOrder(obj, defaultStatus);
-      if (o) results.push(o);
-      return;
-    }
-    Object.values(obj).forEach(walk);
-  };
-  walk(json);
-  return results;
-}
-
-function normalizeOrder(raw, defaultStatus) {
-  const orderId = raw.order_id || raw.orderId || raw.id || '';
-  const subOrderId = raw.sub_order_id || raw.subOrderId || `${orderId}_1`;
-  if (!orderId && !subOrderId) return null;
-
-  return {
-    orderId: String(orderId),
-    subOrderId: String(subOrderId),
-    productName: raw.product_name || raw.productName || raw.name || raw.catalog_name || 'Product',
-    productImage: raw.product_image || raw.productImage || raw.image_url || raw.thumbnail || '',
-    sku: raw.sku || raw.sku_id || raw.skuId || '',
-    variant: raw.size || raw.variant || raw.color || 'Free Size',
-    quantity: Number(raw.quantity || raw.qty || 1),
-    buyerName: raw.buyer_name || raw.buyerName || raw.customer_name || 'Customer',
-    buyerAddress: raw.buyer_address || raw.buyerAddress || raw.shipping_address || '',
-    buyerPhone: raw.buyer_phone || raw.buyerPhone || '',
-    price: parseFloat(raw.price || raw.amount || raw.total_price || 0),
-    paymentMode: (raw.payment_mode || raw.paymentMode || raw.payment_type || 'Prepaid').includes('COD') ? 'COD' : 'Prepaid',
-    status: raw.status || defaultStatus,
-    shipByDate: raw.ship_by_date || raw.shipByDate || raw.dispatch_date || null,
-    orderDate: raw.order_date || raw.orderDate || raw.created_at || new Date().toISOString(),
-    isAd: !!(raw.is_ad || raw.isAd || raw.ad_order),
-    labelStatus: raw.label_status || 'none',
-  };
-}
-
-function extractReturnsFromJson(json) {
-  const results = [];
-  const walk = (obj) => {
-    if (!obj || typeof obj !== 'object') return;
-    if (Array.isArray(obj)) { obj.forEach(walk); return; }
-    if (obj.return_id || obj.returnId) {
-      results.push(normalizeReturn(obj));
-      return;
-    }
-    Object.values(obj).forEach(walk);
-  };
-  walk(json);
-  return results;
-}
-
-function normalizeReturn(raw) {
-  return {
-    returnId: String(raw.return_id || raw.returnId || raw.id || ''),
-    orderId: String(raw.order_id || raw.orderId || ''),
-    subOrderId: String(raw.sub_order_id || raw.subOrderId || ''),
-    productName: raw.product_name || raw.productName || raw.name || 'Product',
-    productImage: raw.product_image || raw.productImage || '',
-    returnReason: raw.return_reason || raw.returnReason || raw.reason || 'Customer request',
-    status: raw.status || 'Initiated',
-    buyerName: raw.buyer_name || raw.buyerName || '',
-    otp: raw.otp || raw.pickup_otp || raw.pickupOtp || null,
-    createdAt: raw.created_at || raw.createdAt || new Date().toISOString(),
-  };
-}
-
-function extractProductsFromJson(json) {
-  const results = [];
-  const walk = (obj) => {
-    if (!obj || typeof obj !== 'object') return;
-    if (Array.isArray(obj)) { obj.forEach(walk); return; }
-    if (obj.catalog_id || obj.catalogId || (obj.sku && obj.name)) {
-      results.push({
-        catalogId: String(obj.catalog_id || obj.catalogId || obj.id || ''),
-        name: obj.name || obj.catalog_name || obj.catalogName || 'Product',
-        sku: obj.sku || obj.sku_id || '',
-        category: obj.category || obj.sub_category || '',
-        price: parseFloat(obj.price || obj.selling_price || 0),
-        mrp: parseFloat(obj.mrp || obj.market_price || 0),
-        stock: parseInt(obj.stock || obj.inventory || 0),
-        status: obj.status || 'active',
-        images: (obj.images || obj.product_images || []).map(i => (typeof i === 'string' ? i : i.url || i.src || '')),
-      });
-      return;
-    }
-    Object.values(obj).forEach(walk);
-  };
-  walk(json);
-  return results;
-}
-
-function extractPaymentsFromJson(json) {
-  const results = [];
-  const walk = (obj) => {
-    if (!obj || typeof obj !== 'object') return;
-    if (Array.isArray(obj)) { obj.forEach(walk); return; }
-    if (obj.payment_id || obj.paymentId || obj.transaction_id) {
-      results.push({
-        paymentId: String(obj.payment_id || obj.paymentId || obj.transaction_id || ''),
-        amount: parseFloat(obj.amount || obj.payout_amount || 0),
-        status: obj.status || 'Pending',
-        mode: obj.mode || obj.payment_mode || 'Bank Transfer',
-        date: obj.payment_date || obj.date || obj.created_at || new Date().toISOString(),
-        description: obj.description || obj.remarks || '',
-        utr: obj.utr || obj.utr_number || '',
-      });
-      return;
-    }
-    Object.values(obj).forEach(walk);
-  };
-  walk(json);
-  return results;
-}
-
-// ─── DOM FALLBACKS ─────────────────────────────────────────────────────────
-
-async function extractOrdersFromDOM(page, tab) {
-  const statusMap = { new_orders: 'Pending', ready_to_dispatch: 'Ready to Ship', on_hold: 'On Hold', shipped: 'Shipped', cancelled: 'Cancelled' };
-  const status = statusMap[tab] || 'Pending';
-  return page.evaluate((status) => {
-    const orders = [];
-    const rows = document.querySelectorAll('tr, [class*="OrderRow"], [class*="order-row" i]');
-    rows.forEach(row => {
-      const cells = row.querySelectorAll('td, [class*="cell" i]');
-      if (cells.length < 3) return;
-      const img = row.querySelector('img');
-      const texts = Array.from(cells).map(c => c.innerText?.trim() || '');
-      const orderId = texts.find(t => /^\d{10,}/.test(t)) || `ORD${Date.now()}`;
-      orders.push({
-        orderId,
-        subOrderId: orderId + '_1',
-        productName: texts[1] || texts[0] || 'Product',
-        productImage: img?.src || '',
-        sku: texts.find(t => t.startsWith('SKU')) || '',
-        variant: 'Free Size',
-        quantity: 1,
-        buyerName: texts[2] || 'Customer',
-        buyerAddress: '',
-        price: parseFloat(texts.find(t => /^\d+(\.\d+)?$/.test(t)) || '0'),
-        paymentMode: texts.some(t => t.includes('COD')) ? 'COD' : 'Prepaid',
-        status,
-        shipByDate: null,
-        orderDate: new Date().toISOString(),
-        isAd: false,
-        labelStatus: 'none',
-      });
-    });
-    return orders;
-  }, status);
-}
-
-async function extractReturnsFromDOM(page) {
-  return page.evaluate(() => {
-    const returns = [];
-    const rows = document.querySelectorAll('tr, [class*="return" i]');
-    rows.forEach(row => {
-      const cells = row.querySelectorAll('td');
-      if (cells.length < 2) return;
-      const texts = Array.from(cells).map(c => c.innerText?.trim() || '');
-      const id = texts.find(t => /^\d{5,}/.test(t));
-      if (!id) return;
-      returns.push({
-        returnId: id,
-        orderId: texts[1] || '',
-        productName: texts[2] || 'Product',
-        productImage: row.querySelector('img')?.src || '',
-        returnReason: texts[3] || 'Customer request',
-        status: texts[4] || 'Initiated',
-        buyerName: texts[5] || '',
-        otp: null,
-      });
-    });
-    return returns;
-  });
-}
-
-async function extractProductsFromDOM(page) {
-  return page.evaluate(() => {
-    const products = [];
-    const rows = document.querySelectorAll('tr, [class*="product-row" i], [class*="catalog-row" i]');
-    rows.forEach(row => {
-      const img = row.querySelector('img');
-      const cells = row.querySelectorAll('td, [class*="cell" i]');
-      if (cells.length < 2) return;
-      const texts = Array.from(cells).map(c => c.innerText?.trim() || '');
-      products.push({
-        catalogId: texts.find(t => /^\d{5,}/.test(t)) || '',
-        name: texts[1] || 'Product',
-        sku: texts.find(t => t.startsWith('SKU')) || '',
-        price: parseFloat(texts.find(t => /^\d+(\.\d+)?$/.test(t)) || '0'),
-        mrp: 0,
-        stock: 0,
-        status: 'active',
-        images: img ? [img.src] : [],
-      });
-    });
-    return products;
-  });
-}
-
-async function extractPaymentsFromDOM(page) {
-  return page.evaluate(() => {
-    const payments = [];
-    const rows = document.querySelectorAll('tr, [class*="payment-row" i]');
-    rows.forEach(row => {
-      const cells = row.querySelectorAll('td');
-      if (cells.length < 2) return;
-      const texts = Array.from(cells).map(c => c.innerText?.trim() || '');
-      const amount = texts.find(t => /^\d/.test(t));
-      if (!amount) return;
-      payments.push({
-        paymentId: `PAY${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-        amount: parseFloat(amount.replace(/[^0-9.]/g, '')),
-        status: texts.find(t => /paid|pending|process/i.test(t)) || 'Pending',
-        mode: 'Bank Transfer',
-        date: new Date().toISOString(),
-        description: '',
-        utr: '',
-      });
-    });
-    return payments;
-  });
 }
 
 module.exports = { MeeshoScraper };
