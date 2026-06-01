@@ -21,21 +21,29 @@ app.use(cors({
 app.use(express.json());
 app.use(cookieParser());
 app.use(morgan('dev'));
-
-app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 200, standardHeaders: true, legacyHeaders: false }));
+app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false }));
 
 app.use('/api/v1', routes);
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
-
+app.get('/health', (req, res) => res.json({ status: 'ok', db: global.dbConnected ? 'connected' : 'disconnected' }));
 app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 
-connect().then(() => {
+const startServer = () => {
   app.listen(PORT, () => console.log(`MeeshoHub backend running on port ${PORT}`));
-  startAutoSync();
-  startAutoLabel();
-}).catch(err => {
-  console.error('Failed to connect to MongoDB:', err.message);
-  process.exit(1);
-});
+};
+
+connect()
+  .then(() => {
+    global.dbConnected = true;
+    console.log('✅ MongoDB connected');
+    startServer();
+    startAutoSync();
+    startAutoLabel();
+  })
+  .catch(err => {
+    console.warn('⚠️  MongoDB unavailable:', err.message);
+    console.warn('Running in degraded mode — data will not persist.');
+    global.dbConnected = false;
+    startServer();
+  });

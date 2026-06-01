@@ -1,81 +1,48 @@
-version: '3.9'
+version: '3.8'
 
 services:
-  mongo:
+  mongodb:
     image: mongo:7
     container_name: meeshohub-mongo
     restart: unless-stopped
-    volumes:
-      - mongo-data:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
     ports:
       - "27017:27017"
-
-  redis:
-    image: redis:7-alpine
-    container_name: meeshohub-redis
-    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: meeshohub
+      MONGO_INITDB_ROOT_PASSWORD: meeshohub_secret
+      MONGO_INITDB_DATABASE: meeshohub
     volumes:
-      - redis-data:/data
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    ports:
-      - "6379:6379"
+      - mongo_data:/data/db
+    networks:
+      - meeshohub
 
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
+    build: ./backend
     container_name: meeshohub-backend
     restart: unless-stopped
-    env_file: .env
-    environment:
-      - MONGO_URI=mongodb://mongo:27017/meeshohub
-      - REDIS_URL=redis://redis:6379
     ports:
       - "5000:5000"
+    env_file:
+      - ./backend/.env
     depends_on:
-      mongo:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  scraper:
-    build:
-      context: ./scraper
-      dockerfile: Dockerfile
-    container_name: meeshohub-scraper
-    restart: unless-stopped
-    env_file: .env
-    environment:
-      - MONGO_URI=mongodb://mongo:27017/meeshohub
-      - REDIS_URL=redis://redis:6379
-      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium-browser
-    depends_on:
-      mongo:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    shm_size: '2gb'
+      - mongodb
+    networks:
+      - meeshohub
 
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    build: ./frontend
     container_name: meeshohub-frontend
     restart: unless-stopped
     ports:
-      - "80:80"
+      - "3000:80"
     depends_on:
       - backend
+    networks:
+      - meeshohub
 
 volumes:
-  mongo-data:
-  redis-data:
+  mongo_data:
+
+networks:
+  meeshohub:
+    driver: bridge
