@@ -16,6 +16,9 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:3000',
+  'https://meeshohub-frontend.vercel.app',
+  'https://saas-product.vercel.app',
+  'https://saas-product-frontend.vercel.app',
 ];
 
 app.use(helmet());
