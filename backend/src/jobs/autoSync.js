@@ -7,6 +7,7 @@ let syncTask = null;
 
 const startAutoSync = () => {
   syncTask = cron.schedule('* * * * *', async () => {
+    if (!global.dbConnected) return;
     try {
       const allSettings = await Settings.find({ autoSyncEnabled: true });
       for (const setting of allSettings) {

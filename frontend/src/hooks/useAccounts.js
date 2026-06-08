@@ -214,6 +214,23 @@ export function useAccounts() {
     },
   })
 
+  const seedMutation = useMutation({
+    mutationFn: async (id) => {
+      const { data } = await api.post(`/accounts/${id}/seed`)
+      return { ...data, accountId: id }
+    },
+    onSuccess: (result) => {
+      toast.success(`Demo data loaded — ${result.orders} orders ready!`)
+      queryClient.invalidateQueries({ queryKey: ['accounts'] })
+      queryClient.invalidateQueries({ queryKey: ['orders'] })
+      queryClient.invalidateQueries({ queryKey: ['returns'] })
+      queryClient.invalidateQueries({ queryKey: ['products'] })
+      queryClient.invalidateQueries({ queryKey: ['payments'] })
+      queryClient.invalidateQueries({ queryKey: ['notifications'] })
+    },
+    onError: () => toast.error('Failed to load demo data — check your backend connection'),
+  })
+
   return {
     accounts,
     isLoading,
@@ -224,5 +241,8 @@ export function useAccounts() {
     syncAccount: syncMutation.mutate,
     isSyncing: syncMutation.isPending,
     syncingId: syncMutation.variables,
+    seedAccount: seedMutation.mutate,
+    isSeeding: seedMutation.isPending,
+    seedingId: seedMutation.variables,
   }
 }
