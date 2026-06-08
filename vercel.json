@@ -1,0 +1,19 @@
+{
+  "experimentalServices": {
+    "frontend": {
+      "src": "frontend",
+      "use": "@vercel/static-build",
+      "config": {
+        "distDir": "dist",
+        "buildCommand": "npm install && npm run build"
+      }
+    },
+    "backend": {
+      "src": "backend",
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": ["src/**"]
+      }
+    }
+  }
+}
