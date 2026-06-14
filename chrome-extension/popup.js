@@ -1,195 +1,184 @@
 'use strict';
 
-const $ = id => document.getElementById(id);
-
-async function getSettings() {
-  return new Promise(resolve => chrome.storage.local.get(['apiUrl', 'token', 'accountId', 'lastSync', 'syncStats'], resolve));
+async function store(data) {
+  return new Promise(r => chrome.storage.local.set(data, r));
+}
+async function load(keys) {
+  return new Promise(r => chrome.storage.local.get(keys, r));
 }
 
-async function saveSettings(data) {
-  return new Promise(resolve => chrome.storage.local.set(data, resolve));
-}
-
-function renderNotMeesho() {
-  document.getElementById('content').innerHTML = `
-    <div class="not-meesho">
-      <div class="icon">🏪</div>
-      <p style="font-weight:600;color:#1e293b;margin-bottom:6px;">Open Meesho Supplier Panel</p>
-      <p>Navigate to supplier.meesho.com to start syncing your data to MeeshoHub.</p>
-      <a href="https://supplier.meesho.com" target="_blank" style="display:inline-block;margin-top:12px;background:#6366f1;color:white;padding:8px 16px;border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;">Open Supplier Panel →</a>
+// ── Render: Login Screen ───────────────────────────────────────────────────
+function renderLogin(apiUrl = 'https://meeshohub-backend.vercel.app') {
+  document.getElementById('body').innerHTML = `
+    <div class="info-box">
+      🔗 Connect to your MeeshoHub account to start syncing data from the Meesho supplier panel.
     </div>
+    <div class="card">
+      <div class="card-title">MeeshoHub Backend URL</div>
+      <input class="input" id="apiUrl" value="${apiUrl}" placeholder="https://meeshohub-backend.vercel.app" />
+    </div>
+    <div class="card">
+      <div class="card-title">Login to MeeshoHub</div>
+      <input class="input" id="email" placeholder="Email address" type="email" />
+      <input class="input" id="pass" placeholder="Password" type="password" style="margin-top:6px" />
+      <button class="btn btn-primary" id="loginBtn" style="margin-top:10px">Login</button>
+    </div>
+    <div id="logArea"></div>
   `;
+  document.getElementById('loginBtn').addEventListener('click', doLogin);
 }
 
-async function renderMain(settings, isMeesho) {
-  const { apiUrl = 'https://meeshohub-backend.vercel.app', token = '', accountId = '', lastSync, syncStats } = settings;
-  const connected = !!token;
+// ── Render: Main Screen ────────────────────────────────────────────────────
+function renderMain(settings, syncState) {
+  const { accounts = [], selectedAccount, lastSync, syncStats } = settings;
+  const acc = accounts.find(a => a._id === selectedAccount) || accounts[0];
+  const running = syncState?.running;
 
-  document.getElementById('content').innerHTML = `
-    <div class="section">
-      <div class="status-card">
-        <div class="label">Backend Connection</div>
-        <div class="value">
-          <span class="status-dot ${connected ? 'dot-green' : 'dot-red'}"></span>
-          ${connected ? 'Connected to MeeshoHub' : 'Not logged in'}
-        </div>
-      </div>
-      ${isMeesho ? `
-      <div class="status-card">
-        <div class="label">Meesho Panel</div>
-        <div class="value"><span class="status-dot dot-green"></span>Active — ready to sync</div>
-      </div>` : ''}
-    </div>
-
-    ${!connected ? `
-    <div class="section">
-      <div class="section-title">Login to MeeshoHub</div>
-      <input class="input" id="apiUrl" placeholder="Backend URL" value="${apiUrl}" style="margin-bottom:8px;" />
-      <input class="input" id="emailInput" placeholder="Email" style="margin-bottom:8px;" />
-      <input class="input" id="passInput" type="password" placeholder="Password" style="margin-bottom:8px;" />
-      <button class="btn btn-primary" id="loginBtn">Login to MeeshoHub</button>
+  document.getElementById('body').innerHTML = `
+    ${accounts.length > 1 ? `
+    <div class="card">
+      <div class="card-title">Active Account</div>
+      <select class="account-select" id="accountSelect">
+        ${accounts.map(a => `<option value="${a._id}" ${a._id === selectedAccount ? 'selected' : ''}>${a.nickname || a.shopName || a.phone}</option>`).join('')}
+      </select>
     </div>` : `
-    <div class="section">
-      <div class="section-title">Sync Data</div>
-      ${isMeesho ? `
-        <button class="btn btn-primary" id="syncBtn">⟳ Sync This Page Data</button>
-        <button class="btn btn-primary" id="syncAllBtn" style="margin-top:8px;background:#059669;">⟳ Sync All Pages (Full Sync)</button>
-      ` : `
-        <p style="font-size:12px;color:#64748b;text-align:center;padding:8px;">Open supplier.meesho.com to sync</p>
-        <a href="https://supplier.meesho.com" target="_blank" style="display:block;text-align:center;margin-top:8px;">
-          <button class="btn btn-outline">Open Meesho Panel</button>
-        </a>
-      `}
-      <button class="btn btn-outline" id="logoutBtn">Logout</button>
-    </div>
-    ${syncStats ? `
-    <div class="section">
-      <div class="section-title">Last Sync Results</div>
-      <div class="stats">
-        <div class="stat"><div class="num">${syncStats.orders || 0}</div><div class="lbl">Orders</div></div>
-        <div class="stat"><div class="num">${syncStats.returns || 0}</div><div class="lbl">Returns</div></div>
-        <div class="stat"><div class="num">${syncStats.products || 0}</div><div class="lbl">Products</div></div>
-        <div class="stat"><div class="num">${syncStats.payments || 0}</div><div class="lbl">Payments</div></div>
+    <div class="card">
+      <div class="status-row">
+        <div class="dot dot-green"></div>
+        <span class="status-label">Connected to MeeshoHub</span>
+        <span class="status-val">${acc?.nickname || acc?.phone || 'Account'}</span>
       </div>
-      ${lastSync ? `<p style="font-size:10px;color:#94a3b8;text-align:center;margin-top:6px;">Last synced: ${new Date(lastSync).toLocaleString()}</p>` : ''}
-    </div>` : ''}
-    `}
+      <div class="status-row">
+        <div class="dot dot-${running ? 'yellow' : 'green'}"></div>
+        <span class="status-label">${running ? 'Syncing…' : 'Ready to sync'}</span>
+        ${lastSync ? `<span class="status-val">${new Date(lastSync).toLocaleDateString()}</span>` : ''}
+      </div>
+    </div>`}
 
+    ${running ? `
+    <div class="card">
+      <div class="card-title">Sync in Progress</div>
+      <div class="progress-bar"><div class="progress-fill" style="width:${Math.round(((syncState.currentPage||0)/8)*100)}%"></div></div>
+      <p style="font-size:11px;color:#64748b;text-align:center">Page ${syncState.currentPage||0} of ${syncState.totalPages||8}</p>
+      <div id="logBox" class="log-box">
+        ${(syncState.log||[]).slice(-8).map(l => `<div class="log-line ${l.type}">[${l.time}] ${l.msg}</div>`).join('')}
+      </div>
+    </div>` : `
+    <div class="card">
+      <div class="card-title">Sync Meesho Data</div>
+      <button class="btn btn-green" id="syncBtn">⟳ Full Sync — All Pages Auto</button>
+      <p style="font-size:10px;color:#94a3b8;margin-top:8px;text-align:center;line-height:1.5">
+        Automatically navigates through Orders, Returns,<br>Products &amp; Payments pages and saves all data.
+      </p>
+    </div>`}
+
+    ${syncStats ? `
+    <div class="card">
+      <div class="card-title">Last Sync Results</div>
+      <div class="stats-grid">
+        <div class="stat"><div class="stat-num">${syncStats.orders||0}</div><div class="stat-lbl">Orders</div></div>
+        <div class="stat"><div class="stat-num">${syncStats.returns||0}</div><div class="stat-lbl">Returns</div></div>
+        <div class="stat"><div class="stat-num">${syncStats.products||0}</div><div class="stat-lbl">Products</div></div>
+        <div class="stat"><div class="stat-num">${syncStats.payments||0}</div><div class="stat-lbl">Payments</div></div>
+      </div>
+      ${lastSync ? `<p style="font-size:10px;color:#94a3b8;text-align:center;margin-top:8px">Last synced: ${new Date(lastSync).toLocaleString()}</p>` : ''}
+    </div>` : ''}
+
+    <button class="btn btn-danger" id="logoutBtn">Logout</button>
     <div id="logArea"></div>
   `;
 
-  // Attach events
-  if (!connected) {
-    document.getElementById('loginBtn')?.addEventListener('click', doLogin);
-  } else {
-    document.getElementById('syncBtn')?.addEventListener('click', () => doSync(false));
-    document.getElementById('syncAllBtn')?.addEventListener('click', () => doSync(true));
-    document.getElementById('logoutBtn')?.addEventListener('click', doLogout);
-  }
+  document.getElementById('accountSelect')?.addEventListener('change', async e => {
+    await store({ selectedAccount: e.target.value, accountId: e.target.value });
+  });
+
+  document.getElementById('syncBtn')?.addEventListener('click', async () => {
+    const btn = document.getElementById('syncBtn');
+    if (btn) { btn.disabled = true; btn.textContent = 'Starting sync…'; }
+    chrome.runtime.sendMessage({ action: 'startSync' });
+    setTimeout(init, 1000);
+  });
+
+  document.getElementById('logoutBtn')?.addEventListener('click', async () => {
+    await store({ token: '', accountId: '', accounts: [], selectedAccount: '' });
+    init();
+  });
 }
 
-function addLog(msg, type = 'info') {
-  let logArea = document.getElementById('logArea');
-  if (!logArea) return;
-  if (!logArea.querySelector('.log')) {
-    logArea.innerHTML = '<div class="log" id="logBox"></div>';
-  }
-  const box = document.getElementById('logBox');
-  const p = document.createElement('p');
-  p.className = type;
-  p.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-  box.appendChild(p);
-  box.scrollTop = box.scrollHeight;
-}
-
+// ── Login ──────────────────────────────────────────────────────────────────
 async function doLogin() {
   const btn = document.getElementById('loginBtn');
-  const apiUrl = document.getElementById('apiUrl').value.trim().replace(/\/$/, '');
-  const email = document.getElementById('emailInput').value.trim();
-  const pass = document.getElementById('passInput').value;
+  const apiUrl = document.getElementById('apiUrl').value.trim().replace(/\/$/, '').replace(/\/api\/v1$/, '');
+  const email  = document.getElementById('email').value.trim();
+  const pass   = document.getElementById('pass').value;
+
   if (!email || !pass) { addLog('Enter email and password', 'error'); return; }
 
-  btn.disabled = true;
-  btn.textContent = 'Logging in…';
+  btn.disabled = true; btn.textContent = 'Logging in…';
   addLog('Connecting to MeeshoHub…', 'info');
 
   try {
-    const res = await fetch(`${apiUrl}/api/v1/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+    const res  = await fetch(`${apiUrl}/api/v1/auth/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ email, password: pass }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Login failed');
 
-    // Get accounts
-    const accRes = await fetch(`${apiUrl}/api/v1/accounts`, {
+    addLog('Fetching your Meesho accounts…', 'info');
+
+    // Load accounts
+    const accRes  = await fetch(`${apiUrl}/api/v1/accounts`, {
       headers: { Authorization: `Bearer ${data.token}` },
     });
     const accounts = await accRes.json();
-    const accountId = Array.isArray(accounts) && accounts.length > 0 ? accounts[0]._id : '';
+    const accList  = Array.isArray(accounts) ? accounts : [];
+    const firstId  = accList[0]?._id || '';
 
-    await saveSettings({ apiUrl, token: data.token, accountId, user: data.user });
-    addLog('✅ Logged in successfully!', 'success');
-    setTimeout(() => init(), 1000);
+    await store({ apiUrl, token: data.token, accountId: firstId, selectedAccount: firstId, accounts: accList, user: data.user });
+
+    addLog(`✅ Logged in! Found ${accList.length} account(s).`, 'success');
+    setTimeout(init, 1200);
   } catch (err) {
     addLog(`❌ ${err.message}`, 'error');
-    btn.disabled = false;
-    btn.textContent = 'Login to MeeshoHub';
+    btn.disabled = false; btn.textContent = 'Login';
   }
 }
 
-async function doLogout() {
-  await saveSettings({ token: '', accountId: '' });
-  init();
-}
-
-async function doSync(fullSync) {
-  const settings = await getSettings();
-  const { apiUrl = 'https://meeshohub-backend.vercel.app', token, accountId } = settings;
-
-  const btn = document.getElementById(fullSync ? 'syncAllBtn' : 'syncBtn');
-  if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
-
-  addLog(fullSync ? 'Starting full sync…' : 'Syncing current page…', 'info');
-
-  try {
-    // Ask content script to scrape the page
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-    const result = await chrome.tabs.sendMessage(tab.id, {
-      action: fullSync ? 'scrapeAll' : 'scrapeCurrent',
-      token,
-      apiUrl,
-      accountId,
-    });
-
-    if (result?.error) throw new Error(result.error);
-
-    const stats = result?.stats || {};
-    await saveSettings({ lastSync: new Date().toISOString(), syncStats: stats });
-    addLog(`✅ Synced! Orders: ${stats.orders || 0}, Returns: ${stats.returns || 0}, Products: ${stats.products || 0}`, 'success');
-    setTimeout(() => init(), 1500);
-  } catch (err) {
-    addLog(`❌ ${err.message}`, 'error');
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = fullSync ? '⟳ Sync All Pages (Full Sync)' : '⟳ Sync This Page Data'; }
+function addLog(msg, type = 'info') {
+  let area = document.getElementById('logArea');
+  if (!area) return;
+  if (!area.querySelector('.log-box')) {
+    area.innerHTML = '<div class="log-box" id="logBox"></div>';
   }
+  const box = document.getElementById('logBox');
+  const div = document.createElement('div');
+  div.className = `log-line ${type}`;
+  div.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  box.appendChild(div);
+  box.scrollTop = box.scrollHeight;
 }
 
+// ── Init ───────────────────────────────────────────────────────────────────
 async function init() {
-  const settings = await getSettings();
+  const settings = await load(['apiUrl', 'token', 'accountId', 'accounts', 'selectedAccount', 'lastSync', 'syncStats']);
 
-  // Check if current tab is Meesho supplier panel
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  const isMeesho = tab?.url?.includes('supplier.meesho.com');
-
-  if (!settings.token && !isMeesho) {
-    renderNotMeesho();
+  if (!settings.token) {
+    renderLogin(settings.apiUrl);
     return;
   }
 
-  renderMain(settings, isMeesho);
+  // Get sync state from background
+  chrome.runtime.sendMessage({ action: 'getSyncState' }, (syncState) => {
+    renderMain(settings, syncState || {});
+  });
 }
+
+// Listen for live updates from background during sync
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.action === 'syncUpdate' || msg.action === 'syncComplete') {
+    init();
+  }
+});
 
 document.addEventListener('DOMContentLoaded', init);
